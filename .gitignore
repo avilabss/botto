@@ -1,3 +1,6 @@
+# VSCode generated files
+.VSCodeCounter/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -17,4 +20,5 @@ task-briefs/
 ARCHITECTURE.md
 
 # Others
-.VSCodeCounter/
+/quick_run.py
+/botto-artifacts
