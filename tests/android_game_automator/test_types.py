@@ -1,17 +1,15 @@
-"""Tests for core data models and invariants."""
+"""Tests for shared SDK data models and invariants."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
 import pytest
-from android_game_automator.image import FrameImage
 from android_game_automator.types import (
     DeviceIdentity,
     DeviceInfo,
     NormalizedPoint,
     NormalizedRect,
-    PixelFormat,
     Point,
     Rect,
     SessionInfo,
@@ -98,7 +96,7 @@ def test_viewport_maps_landscape_and_region_restricted_coordinates() -> None:
         )
 
 
-def test_device_session_and_image_models_have_value_semantics() -> None:
+def test_device_and_session_models_have_value_semantics() -> None:
     now = datetime.now(UTC)
     source_metadata = {"model": "Pixel"}
     session_metadata = {"run_id": "1"}
@@ -117,23 +115,9 @@ def test_device_session_and_image_models_have_value_semantics() -> None:
         metadata=session_metadata,
     )
 
-    image = FrameImage(
-        size=Size(width=1, height=1),
-        pixel_format=PixelFormat.RGBA32,
-        data=b"\x89PNG",
-        captured_at=now,
-        frame_id="frame-1",
-    )
     source_metadata["model"] = "Mutated"
     session_metadata["run_id"] = "mutated"
 
-    assert image == FrameImage(
-        size=Size(width=1, height=1),
-        pixel_format=PixelFormat.RGBA32,
-        data=b"\x89PNG",
-        captured_at=now,
-        frame_id="frame-1",
-    )
     assert session.device.identity.device_id == "emulator-5554"
     assert device.metadata["model"] == "Pixel"
     assert session.metadata["run_id"] == "1"
@@ -143,6 +127,3 @@ def test_device_session_and_image_models_have_value_semantics() -> None:
 
     with pytest.raises(TypeError):
         session.metadata["run_id"] = "mutated"
-
-    with pytest.raises(ValueError):
-        FrameImage(size=Size(width=1, height=1), pixel_format=PixelFormat.RGBA32, data=b"")

@@ -14,10 +14,12 @@ import numpy.typing as npt
 from PIL import Image
 
 from android_game_automator.image import FrameImage, resolve_region
-from android_game_automator.types import Match, Point, Rect, ScreenRect, Size, Viewport
+from android_game_automator.types import Match, PixelFormat, Point, Rect, ScreenRect, Size, Viewport
 
 type GrayImage = npt.NDArray[np.uint8]
 type ImageInput = FrameImage | Image.Image | str | PathLike[str]
+
+_MIN_VISIBLE_ALPHA_PIXELS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,20 +47,29 @@ def find_template(
     threshold: float | None = None,
     scales: Iterable[float] = (1.0,),
     rotations: Iterable[float] = (0.0,),
+    alpha_threshold: int = 16,
 ) -> Match | None:
-    """Return the best OpenCV template match, or ``None`` below the threshold."""
+    """Return the best OpenCV template match, or ``None`` below the threshold.
+
+    Transparent template pixels with alpha below ``alpha_threshold`` are ignored.
+    """
 
     resolved_min_confidence = _resolve_min_confidence(min_confidence, threshold)
     resolved_scales = _normalize_scales(scales)
     resolved_rotations = _normalize_rotations(rotations)
+    resolved_alpha_threshold = _normalize_alpha_threshold(alpha_threshold)
     source_image = _coerce_image(source, name="source")
     template_image = _coerce_image(template, name="template")
+    template_mask = _template_alpha_mask(template_image, alpha_threshold=resolved_alpha_threshold)
+    if template_mask is not None:
+        _validate_visible_alpha_mask(template_mask)
     search_region = resolve_region(region, Viewport(surface_size=source_image.size))
 
     match = _match_template(
         source_image,
         search_region,
         template_image,
+        template_mask=template_mask,
         scales=resolved_scales,
         rotations=resolved_rotations,
     )
@@ -74,25 +85,30 @@ def find_feature_match(
     region: ScreenRect | None = None,
     min_matches: int = 8,
     min_confidence: float = 0.25,
+    alpha_threshold: int = 16,
 ) -> FeatureMatch | None:
     """Return the best ORB feature match for textured objects, or ``None``.
 
     ORB matching is useful for feature-rich/textured objects. For flat UI icons or
-    buttons, prefer :func:`find_template`.
+    buttons, prefer :func:`find_template`. Transparent template pixels with alpha
+    below ``alpha_threshold`` are excluded from template keypoint detection.
     """
 
     if min_matches < 4:
         raise ValueError("min_matches must be >= 4")
     _validate_confidence(min_confidence, name="min_confidence")
+    resolved_alpha_threshold = _normalize_alpha_threshold(alpha_threshold)
 
     source_image = _coerce_image(source, name="source")
     template_image = _coerce_image(template, name="template")
+    template_mask = _template_alpha_mask(template_image, alpha_threshold=resolved_alpha_threshold)
     search_region = resolve_region(region, Viewport(surface_size=source_image.size))
 
     match = _match_features(
         source_image,
         search_region,
         template_image,
+        template_mask=template_mask,
         min_matches=min_matches,
     )
     if match is None or match.confidence < min_confidence:
@@ -111,6 +127,14 @@ def _resolve_min_confidence(min_confidence: float, threshold: float | None) -> f
 def _validate_confidence(value: float, *, name: str) -> None:
     if not 0.0 <= value <= 1.0:
         raise ValueError(f"{name} must be within [0.0, 1.0]")
+
+
+def _normalize_alpha_threshold(alpha_threshold: int) -> int:
+    if isinstance(alpha_threshold, bool) or not isinstance(alpha_threshold, int):
+        raise ValueError("alpha_threshold must be an int within [0, 255]")
+    if not 0 <= alpha_threshold <= 255:
+        raise ValueError("alpha_threshold must be within [0, 255]")
+    return alpha_threshold
 
 
 def _normalize_scales(scales: Iterable[float]) -> tuple[float, ...]:
@@ -148,6 +172,7 @@ def _match_template(
     search_region: Rect,
     template: FrameImage,
     *,
+    template_mask: GrayImage | None,
     scales: tuple[float, ...],
     rotations: tuple[float, ...],
 ) -> Match | None:
@@ -163,13 +188,31 @@ def _match_template(
 
     for scale in scales:
         scaled_template = _scaled_template_array(template_array, scale)
+        scaled_mask = (
+            _scaled_template_array(template_mask, scale) if template_mask is not None else None
+        )
         for rotation in rotations:
             transformed_template = _rotated_template_array(scaled_template, rotation)
+            transformed_mask = (
+                _rotated_template_array(scaled_mask, rotation) if scaled_mask is not None else None
+            )
+            if (
+                transformed_mask is not None
+                and _visible_mask_pixel_count(transformed_mask) < _MIN_VISIBLE_ALPHA_PIXELS
+            ):
+                continue
             template_height, template_width = transformed_template.shape[:2]
             if template_width > search_region.width or template_height > search_region.height:
                 continue
 
-            confidence, offset = _best_template_match(search_array, transformed_template)
+            best_match = _best_template_match(
+                search_array,
+                transformed_template,
+                template_mask=transformed_mask,
+            )
+            if best_match is None:
+                continue
+            confidence, offset = best_match
             transformed_area = template_width * template_height
             if confidence < best_confidence:
                 continue
@@ -202,14 +245,21 @@ def _match_features(
     search_region: Rect,
     template: FrameImage,
     *,
+    template_mask: GrayImage | None,
     min_matches: int,
 ) -> FeatureMatch | None:
+    if (
+        template_mask is not None
+        and _visible_mask_pixel_count(template_mask) < _MIN_VISIBLE_ALPHA_PIXELS
+    ):
+        return None
+
     search_image = source.crop(search_region)
     search_array = _frame_image_to_grayscale_array(search_image)
     template_array = _frame_image_to_grayscale_array(template)
 
     orb = cast(Any, cv2).ORB_create(nfeatures=1000, edgeThreshold=5)
-    template_keypoints, template_descriptors = orb.detectAndCompute(template_array, None)
+    template_keypoints, template_descriptors = orb.detectAndCompute(template_array, template_mask)
     search_keypoints, search_descriptors = orb.detectAndCompute(search_array, None)
     if template_descriptors is None or search_descriptors is None:
         return None
@@ -348,6 +398,37 @@ def _frame_image_to_grayscale_array(image: FrameImage) -> GrayImage:
         source.close()
 
 
+def _template_alpha_mask(template: FrameImage, *, alpha_threshold: int) -> GrayImage | None:
+    alpha_array = _frame_image_alpha_array(template)
+    if alpha_array is None or bool(np.all(alpha_array == 255)):
+        return None
+    return cast(GrayImage, np.where(alpha_array >= alpha_threshold, 255, 0).astype(np.uint8))
+
+
+def _frame_image_alpha_array(image: FrameImage) -> GrayImage | None:
+    if image.pixel_format not in (PixelFormat.RGBA32, PixelFormat.BGRA32):
+        return None
+    rgba_array = np.frombuffer(image.data, dtype=np.uint8).reshape(
+        image.height,
+        image.width,
+        image.channels,
+    )
+    return cast(GrayImage, rgba_array[:, :, 3].copy())
+
+
+def _visible_mask_pixel_count(mask: GrayImage) -> int:
+    return int(np.count_nonzero(mask))
+
+
+def _validate_visible_alpha_mask(mask: GrayImage) -> None:
+    visible_pixels = _visible_mask_pixel_count(mask)
+    if visible_pixels < _MIN_VISIBLE_ALPHA_PIXELS:
+        raise ValueError(
+            "template alpha mask must contain at least "
+            f"{_MIN_VISIBLE_ALPHA_PIXELS} visible pixels"
+        )
+
+
 def _scaled_template_array(template_image: GrayImage, scale: float) -> GrayImage:
     height, width = template_image.shape[:2]
     scaled_width = max(1, round(width * scale))
@@ -408,9 +489,27 @@ def _right_angle_rotation(rotation: float) -> int | None:
 def _best_template_match(
     search_image: GrayImage,
     template_image: GrayImage,
-) -> tuple[float, Point]:
-    match_result = cv2.matchTemplate(search_image, template_image, cv2.TM_SQDIFF_NORMED)
+    *,
+    template_mask: GrayImage | None,
+) -> tuple[float, Point] | None:
+    if template_mask is None:
+        match_result = cv2.matchTemplate(search_image, template_image, cv2.TM_SQDIFF_NORMED)
+    else:
+        match_result = cv2.matchTemplate(
+            search_image,
+            template_image,
+            cv2.TM_SQDIFF_NORMED,
+            mask=template_mask,
+        )
+    if template_mask is not None:
+        finite_values = np.isfinite(match_result)
+        if not bool(finite_values.any()):
+            return None
+        match_result = match_result.copy()
+        match_result[~finite_values] = np.inf
     min_value, _, min_location, _ = cv2.minMaxLoc(match_result)
+    if template_mask is not None and not math.isfinite(min_value):
+        return None
     confidence = max(0.0, min(1.0, 1.0 - min_value))
     return confidence, Point(x=min_location[0], y=min_location[1])
 

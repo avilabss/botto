@@ -1,4 +1,4 @@
-"""Tests for ADB backend device/session behavior."""
+"""Tests for ADB device/session behavior."""
 
 from __future__ import annotations
 
@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from io import BytesIO
 
 import pytest
+from android_game_automator.adb._types import AdbListedDevice
+from android_game_automator.types import (
+    NormalizedPoint,
+    PixelFormat,
+    Point,
+)
+from PIL import Image
+
 from android_game_automator.adb import (
     AdbDeviceBackend,
     AdbDeviceDiscoveryError,
@@ -17,13 +25,6 @@ from android_game_automator.adb import (
     AdbSessionClosedError,
     AndroidKey,
 )
-from android_game_automator.adb._types import AdbListedDevice
-from android_game_automator.types import (
-    NormalizedPoint,
-    PixelFormat,
-    Point,
-)
-from PIL import Image
 
 
 def make_png_bytes(size: tuple[int, int], rgba: tuple[int, int, int, int]) -> bytes:

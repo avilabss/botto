@@ -286,6 +286,13 @@ asyncio.run(main())
 
 Returned `Match.bounds` and `Match.center` use absolute source-image pixels.
 
+Transparent PNG templates are supported. When the template has an alpha channel,
+`find_template(...)` ignores template pixels whose alpha is below
+`alpha_threshold` (default `16`), which is useful for assets saved with
+transparent padding. If the visible alpha mask is empty or too small to match
+reliably, `find_template(...)` raises `ValueError`. Source-image alpha is not
+used as a mask.
+
 ## ORB feature matching
 
 Use `find_feature_match(...)` for textured or feature-rich targets. Keep
@@ -326,6 +333,12 @@ asyncio.run(main())
 
 `match.center` is an absolute pixel `Point` in the source image, so it can be
 passed directly to `session.tap(...)`.
+
+Transparent PNG templates are also supported for ORB matching. When the template
+has an alpha channel, `find_feature_match(...)` passes pixels with alpha below
+`alpha_threshold` (default `16`) as masked-out pixels for template keypoint and
+descriptor detection. A fully transparent or otherwise unusable template returns
+`None` instead of raising.
 
 ## OCR
 

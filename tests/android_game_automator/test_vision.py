@@ -1,132 +1,14 @@
-"""Tests for the lightweight ROI-first vision foundation."""
+"""Tests for OpenCV-backed vision matching helpers."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
 import pytest
-from android_game_automator.image import (
-    FrameImage,
-    get_color,
-    intersect_regions,
-    pixel_color_matches,
-    probe_color,
-    rect_to_normalized,
-    resolve_point,
-    resolve_region,
-)
-from android_game_automator.types import (
-    Match,
-    NormalizedPoint,
-    NormalizedRect,
-    PixelFormat,
-    Point,
-    Rect,
-    Size,
-    Viewport,
-)
-from PIL import Image, ImageDraw
-
+from android_game_automator.image import FrameImage
+from android_game_automator.types import Match, PixelFormat, Point, Rect, Size
 from android_game_automator.vision import FeatureMatch, find_feature_match, find_template
-
-
-def test_frame_image_exposes_pixel_array() -> None:
-    image = _rgba_image()
-
-    assert image.width == 2
-    assert image.height == 2
-    assert image.pixel(Point(x=1, y=0)) == (0, 255, 0, 255)
-    assert image.to_array() == (
-        ((255, 0, 0, 255), (0, 255, 0, 255)),
-        ((0, 0, 255, 255), (255, 255, 0, 255)),
-    )
-
-
-def test_frame_image_save_persists_png(tmp_path) -> None:  # noqa: ANN001
-    path = tmp_path / "screenshot.png"
-
-    _rgba_image().save(path)
-
-    with Image.open(path) as image:
-        assert image.mode == "RGBA"
-        assert image.size == (2, 2)
-        assert image.getpixel((0, 0)) == (255, 0, 0, 255)
-
-
-def test_get_color_reads_absolute_points() -> None:
-    image = _rgba_image()
-
-    assert get_color(image, Point(x=1, y=0)) == (0, 255, 0, 255)
-
-
-def test_get_color_reads_normalized_points_with_viewport() -> None:
-    image = _rgba_image()
-    viewport = Viewport(surface_size=image.size, region=Rect(left=1, top=1, width=1, height=1))
-
-    assert get_color(image, NormalizedPoint(x=0.0, y=0.0), viewport=viewport) == (
-        255,
-        255,
-        0,
-        255,
-    )
-
-
-def test_resolve_region_and_crop_support_normalized_and_absolute_rois() -> None:
-    image = _rgba_image()
-    viewport = Viewport(surface_size=image.size, region=Rect(left=0, top=0, width=2, height=2))
-
-    assert resolve_region(
-        NormalizedRect(left=0.5, top=0.0, width=0.5, height=0.5),
-        viewport,
-    ) == Rect(
-        left=1,
-        top=0,
-        width=1,
-        height=1,
-    )
-    assert image.crop(Rect(left=0, top=1, width=2, height=1)).to_array() == (
-        ((0, 0, 255, 255), (255, 255, 0, 255)),
-    )
-
-    with pytest.raises(ValueError):
-        resolve_region(Rect(left=2, top=0, width=1, height=1), viewport)
-
-
-def test_point_probe_and_color_matching_support_tolerance() -> None:
-    image = _rgba_image()
-
-    assert resolve_point(
-        NormalizedPoint(x=1.0, y=1.0),
-        Viewport(surface_size=image.size),
-    ) == Point(x=1, y=1)
-    assert probe_color(image, Point(x=0, y=0), (254, 1, 0, 255), tolerance=1)
-    assert not probe_color(image, Point(x=0, y=0), (250, 0, 0, 255), tolerance=1)
-    assert pixel_color_matches((10, 20, 30), (12, 18, 31), tolerance=2)
-
-    with pytest.raises(ValueError):
-        pixel_color_matches((1, 2, 3), (1, 2), tolerance=0)
-
-
-def test_rect_to_normalized_round_trips_edge_aligned_rects() -> None:
-    size = Size(width=3, height=3)
-    rect = Rect(left=1, top=1, width=2, height=2)
-    normalized = rect_to_normalized(rect, size)
-
-    assert normalized.left == pytest.approx(1 / 3)
-    assert normalized.top == pytest.approx(1 / 3)
-    assert normalized.right == pytest.approx(1.0)
-    assert normalized.bottom == pytest.approx(1.0)
-    assert Viewport(surface_size=size).map_rect(normalized) == rect
-
-
-def test_intersect_regions_excludes_non_overlapping_regions() -> None:
-    assert (
-        intersect_regions(
-            Rect(left=0, top=0, width=1, height=1),
-            Rect(left=1, top=1, width=1, height=1),
-        )
-        is None
-    )
+from PIL import Image, ImageDraw
 
 
 def test_find_template_uses_full_frame_by_default_and_respects_roi() -> None:
@@ -195,6 +77,34 @@ def test_find_template_supports_frame_image_pil_path_and_threshold_alias(tmp_pat
     assert match.confidence >= 0.4
 
 
+def test_find_template_ignores_transparent_template_padding() -> None:
+    image, template = _transparent_padded_template_scene()
+
+    match = find_template(image, template, min_confidence=0.99)
+
+    assert isinstance(match, Match)
+    assert match.bounds == Rect(left=2, top=2, width=4, height=4)
+    assert match.confidence == pytest.approx(1.0)
+
+
+def test_find_template_rejects_fully_transparent_template() -> None:
+    image = _template_scene_image(scale=1)
+    template = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+
+    with pytest.raises(ValueError, match="alpha mask"):
+        find_template(image, template)
+
+
+def test_find_template_preserves_non_alpha_template_matching() -> None:
+    image, transparent_template = _transparent_padded_template_scene()
+    rgb_template = transparent_template.convert("RGB")
+
+    try:
+        assert find_template(image, rgb_template, min_confidence=0.99) is None
+    finally:
+        rgb_template.close()
+
+
 def test_find_feature_match_uses_orb_and_respects_roi() -> None:
     image, template = _feature_scene_image()
 
@@ -230,6 +140,24 @@ def test_find_feature_match_uses_orb_and_respects_roi() -> None:
     )
 
 
+def test_find_feature_match_uses_alpha_mask_for_padded_template() -> None:
+    image, template = _transparent_padded_feature_scene()
+
+    match = find_feature_match(image, template, min_matches=8, min_confidence=0.20)
+
+    assert isinstance(match, FeatureMatch)
+    assert match.match_count >= 8
+    assert match.center.x == pytest.approx(150, abs=8)
+    assert match.center.y == pytest.approx(115, abs=8)
+
+
+def test_find_feature_match_returns_none_for_fully_transparent_template() -> None:
+    image, _ = _feature_scene_image()
+    template = Image.new("RGBA", (80, 80), (0, 0, 0, 0))
+
+    assert find_feature_match(image, template, min_matches=4, min_confidence=0.0) is None
+
+
 def test_find_template_validates_threshold_scales_and_rotations() -> None:
     image = _template_scene_image(scale=1)
     template = _template_image()
@@ -249,34 +177,11 @@ def test_find_template_validates_threshold_scales_and_rotations() -> None:
     with pytest.raises(ValueError, match="min_confidence"):
         find_feature_match(image, template, min_confidence=1.1)
 
+    with pytest.raises(ValueError, match="alpha_threshold"):
+        find_template(image, template, alpha_threshold=256)
 
-def _rgba_image(*, frame_id: str | None = None) -> FrameImage:
-    return FrameImage(
-        size=Size(width=2, height=2),
-        pixel_format=PixelFormat.RGBA32,
-        data=bytes(
-            [
-                255,
-                0,
-                0,
-                255,
-                0,
-                255,
-                0,
-                255,
-                0,
-                0,
-                255,
-                255,
-                255,
-                255,
-                0,
-                255,
-            ]
-        ),
-        captured_at=datetime.now(UTC),
-        frame_id=frame_id,
-    )
+    with pytest.raises(ValueError, match="alpha_threshold"):
+        find_feature_match(image, template, alpha_threshold=-1)
 
 
 def _template_image() -> FrameImage:
@@ -316,6 +221,21 @@ def _template_scene_image(*, scale: int, altered: bool = False) -> FrameImage:
     )
 
 
+def _transparent_padded_template_scene() -> tuple[FrameImage, Image.Image]:
+    visible = Image.new("RGBA", (2, 2), (0, 0, 0, 255))
+    visible.putpixel((0, 0), (240, 240, 240, 255))
+    visible.putpixel((1, 0), (30, 30, 30, 255))
+    visible.putpixel((0, 1), (90, 90, 90, 255))
+    visible.putpixel((1, 1), (180, 180, 180, 255))
+
+    scene = Image.new("RGBA", (8, 8), (40, 40, 40, 255))
+    scene.paste(visible, (3, 3))
+
+    template = Image.new("RGBA", (4, 4), (255, 255, 255, 0))
+    template.paste(visible, (1, 1))
+    return FrameImage.from_pil_image(scene), template
+
+
 def _rotated_template_scene_image(*, rotation: float) -> FrameImage:
     template = _asymmetric_template_image().to_pil_image()
     rotated = template.rotate(rotation, expand=True, resample=Image.Resampling.NEAREST)
@@ -351,6 +271,17 @@ def _feature_scene_image() -> tuple[FrameImage, FrameImage]:
     )
 
 
+def _transparent_padded_feature_scene() -> tuple[FrameImage, FrameImage]:
+    visible = _feature_template_image()
+    scene = Image.new("RGBA", (300, 260), (80, 80, 80, 255))
+    scene.paste(visible, (90, 70))
+
+    template = Image.new("RGBA", (160, 130), (255, 0, 255, 0))
+    template.paste(visible, (20, 20))
+
+    return FrameImage.from_pil_image(scene), FrameImage.from_pil_image(template)
+
+
 def _feature_template_image() -> Image.Image:
     image = Image.new("RGBA", (120, 90), (240, 240, 240, 255))
     draw = ImageDraw.Draw(image)
@@ -359,7 +290,11 @@ def _feature_template_image() -> Image.Image:
     for y in range(10, 90, 20):
         draw.ellipse((5, y, 17, y + 12), fill=(255, 0, 0, 255))
         draw.rectangle((95, y, 110, y + 10), fill=(0, 0, 255, 255))
-    draw.polygon([(60, 10), (80, 40), (50, 60), (35, 30)], outline=(0, 128, 0, 255), width=3)
+    draw.polygon(
+        [(60, 10), (80, 40), (50, 60), (35, 30)],
+        outline=(0, 128, 0, 255),
+        width=3,
+    )
     for x, y in ((30, 20), (70, 70), (15, 70), (100, 20), (60, 45)):
         draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=(0, 0, 0, 255))
     return image
