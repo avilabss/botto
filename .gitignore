@@ -21,4 +21,5 @@ ARCHITECTURE.md
 
 # Others
 /quick_run.py
-/botto-artifacts
+/.botto-output
+/botto-output

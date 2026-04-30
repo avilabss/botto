@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import android_game_automator.vision.detectors as vision_detectors
 import pytest
-from PIL import Image
-
-from android_game_automator.core import (
-    CapturedFrame,
-    Detection,
-    DetectionRequest,
-    FrameMetadata,
+from android_game_automator.image import (
+    FrameImage,
+    intersect_regions,
+    pixel_color_matches,
+    probe_color,
+    rect_to_normalized,
+    resolve_point,
+    resolve_region,
+)
+from android_game_automator.types import (
+    Match,
     NormalizedPoint,
     NormalizedRect,
     PixelFormat,
@@ -21,25 +24,13 @@ from android_game_automator.core import (
     Size,
     Viewport,
 )
-from android_game_automator.vision import (
-    CompositeVisionDetector,
-    FrameImage,
-    PixelColorDetector,
-    TemplateMatchingDetector,
-    VisionTemplate,
-    frame_image_from_captured_frame,
-    intersect_regions,
-    pixel_color_matches,
-    probe_color,
-    rect_to_normalized,
-    resolve_point,
-    resolve_region,
-    run_detector,
-)
+from PIL import Image
+
+from android_game_automator.vision import find_template
 
 
-def test_frame_image_converts_captured_frame_into_pixel_array() -> None:
-    image = frame_image_from_captured_frame(_rgba_frame())
+def test_frame_image_exposes_pixel_array() -> None:
+    image = _rgba_image()
 
     assert image.width == 2
     assert image.height == 2
@@ -50,8 +41,19 @@ def test_frame_image_converts_captured_frame_into_pixel_array() -> None:
     )
 
 
+def test_frame_image_save_persists_png(tmp_path) -> None:  # noqa: ANN001
+    path = tmp_path / "screenshot.png"
+
+    _rgba_image().save(path)
+
+    with Image.open(path) as image:
+        assert image.mode == "RGBA"
+        assert image.size == (2, 2)
+        assert image.getpixel((0, 0)) == (255, 0, 0, 255)
+
+
 def test_resolve_region_and_crop_support_normalized_and_absolute_rois() -> None:
-    image = frame_image_from_captured_frame(_rgba_frame())
+    image = _rgba_image()
     viewport = Viewport(surface_size=image.size, region=Rect(left=0, top=0, width=2, height=2))
 
     assert resolve_region(
@@ -72,7 +74,7 @@ def test_resolve_region_and_crop_support_normalized_and_absolute_rois() -> None:
 
 
 def test_point_probe_and_color_matching_support_tolerance() -> None:
-    image = frame_image_from_captured_frame(_rgba_frame())
+    image = _rgba_image()
 
     assert resolve_point(
         NormalizedPoint(x=1.0, y=1.0),
@@ -84,95 +86,6 @@ def test_point_probe_and_color_matching_support_tolerance() -> None:
 
     with pytest.raises(ValueError):
         pixel_color_matches((1, 2, 3), (1, 2), tolerance=0)
-
-
-def test_pixel_color_detector_respects_request_roi_and_filters() -> None:
-    frame = _rgba_frame(frame_id="frame-vision")
-    detector = PixelColorDetector(
-        label="coin",
-        point=NormalizedPoint(x=0.5, y=1.0),
-        expected_color=(0, 0, 255, 255),
-        region=NormalizedRect(left=0.0, top=0.5, width=0.5, height=0.5),
-        confidence=0.8,
-    )
-
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(
-            labels=("coin",),
-            min_confidence=0.7,
-            region=Rect(left=0, top=1, width=1, height=1),
-        ),
-    )
-
-    assert result.frame_id == "frame-vision"
-    assert result.detector_name == "pixel-color"
-    assert len(result.detections) == 1
-    assert result.detections[0].label == "coin"
-    assert result.detections[0].bounds == NormalizedRect(
-        left=0.0,
-        top=0.5,
-        width=0.5,
-        height=0.5,
-    )
-
-    filtered = run_detector(detector, frame, DetectionRequest(labels=("enemy",)))
-    assert filtered.detections == ()
-
-
-def test_pixel_color_detector_resolves_detector_roi_before_request_roi() -> None:
-    frame = _rgba_frame()
-    detector = PixelColorDetector(
-        label="green",
-        point=NormalizedPoint(x=1.0, y=0.0),
-        expected_color=(0, 255, 0, 255),
-        region=NormalizedRect(left=0.5, top=0.0, width=0.5, height=0.5),
-    )
-
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(region=Rect(left=1, top=0, width=1, height=1)),
-    )
-
-    assert [detection.label for detection in result.detections] == ["green"]
-
-
-def test_pixel_color_detector_keeps_detector_local_point_space_with_subset_request_roi() -> None:
-    frame = _rgba_frame()
-    detector = PixelColorDetector(
-        label="green",
-        point=NormalizedPoint(x=1.0, y=0.0),
-        expected_color=(0, 255, 0, 255),
-        region=NormalizedRect(left=0.0, top=0.0, width=1.0, height=0.5),
-    )
-
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(region=Rect(left=1, top=0, width=1, height=1)),
-    )
-
-    assert [detection.label for detection in result.detections] == ["green"]
-
-
-def test_pixel_color_detector_returns_no_detections_for_non_overlapping_rois() -> None:
-    frame = _rgba_frame()
-    detector = PixelColorDetector(
-        label="green",
-        point=NormalizedPoint(x=0.0, y=0.0),
-        expected_color=(0, 255, 0, 255),
-        region=NormalizedRect(left=0.5, top=0.0, width=0.5, height=0.5),
-    )
-
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(region=Rect(left=0, top=1, width=1, height=1)),
-    )
-
-    assert result.detections == ()
 
 
 def test_rect_to_normalized_round_trips_edge_aligned_rects() -> None:
@@ -187,7 +100,7 @@ def test_rect_to_normalized_round_trips_edge_aligned_rects() -> None:
     assert Viewport(surface_size=size).map_rect(normalized) == rect
 
 
-def test_intersect_regions_excludes_non_overlapping_request_and_detector_rois() -> None:
+def test_intersect_regions_excludes_non_overlapping_regions() -> None:
     assert (
         intersect_regions(
             Rect(left=0, top=0, width=1, height=1),
@@ -197,273 +110,90 @@ def test_intersect_regions_excludes_non_overlapping_request_and_detector_rois() 
     )
 
 
-def test_composite_detector_combines_and_limits_results() -> None:
-    frame = _rgba_frame()
-    detector = CompositeVisionDetector(
-        detectors=(
-            PixelColorDetector(
-                label="red",
-                point=Point(x=0, y=0),
-                expected_color=(255, 0, 0, 255),
-                confidence=0.9,
-            ),
-            PixelColorDetector(
-                label="green",
-                point=Point(x=1, y=0),
-                expected_color=(0, 255, 0, 255),
-                confidence=0.6,
-            ),
-        )
-    )
+def test_find_template_uses_full_frame_by_default_and_respects_roi() -> None:
+    image = _template_scene_image(scale=2)
 
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(min_confidence=0.5, max_results=1),
-    )
-
-    assert result.detector_name == "composite"
-    assert [detection.label for detection in result.detections] == ["red"]
-
-
-def test_template_matching_detector_finds_exact_match() -> None:
-    frame = _template_scene_frame(scale=1)
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="badge",
-                image=_template_image(),
-                min_confidence=0.99,
-            ),
-        )
-    )
-
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(region=Rect(left=0, top=0, width=5, height=5)),
-    )
-
-    assert result.detector_name == "template-matcher"
-    assert len(result.detections) == 1
-    detection = result.detections[0]
-    assert detection.label == "badge"
-    assert detection.confidence == pytest.approx(1.0)
-    assert detection.bounds is not None
-    assert detection.bounds.left == pytest.approx(1 / 5)
-    assert detection.bounds.top == pytest.approx(1 / 5)
-    assert detection.bounds.width == pytest.approx(2 / 5)
-    assert detection.bounds.height == pytest.approx(2 / 5)
-    assert detection.attributes["scale"] == "1"
-
-
-def test_template_matching_detector_supports_scaled_matches() -> None:
-    frame = _template_scene_frame(scale=2)
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="badge",
-                image=_template_image(),
-                min_confidence=0.99,
-                scales=(1.0, 2.0),
-            ),
-        )
-    )
-
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(region=Rect(left=0, top=0, width=5, height=5)),
-    )
-
-    assert len(result.detections) == 1
-    detection = result.detections[0]
-    assert detection.confidence == pytest.approx(1.0)
-    assert detection.bounds is not None
-    assert detection.bounds.left == pytest.approx(1 / 5)
-    assert detection.bounds.top == pytest.approx(1 / 5)
-    assert detection.bounds.width == pytest.approx(4 / 5)
-    assert detection.bounds.height == pytest.approx(4 / 5)
-    assert detection.attributes["scale"] == "2"
-
-
-def test_template_matching_detector_filters_below_template_threshold() -> None:
-    frame = _template_scene_frame(scale=1, altered=True)
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="badge",
-                image=_template_image(),
-                min_confidence=0.95,
-            ),
-        )
-    )
-
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(region=Rect(left=0, top=0, width=5, height=5)),
-    )
-
-    assert result.detections == ()
-
-
-def test_template_matching_detector_requires_explicit_full_frame_opt_in() -> None:
-    frame = _template_scene_frame(scale=1)
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="badge",
-                image=_template_image(),
-                min_confidence=0.99,
-            ),
-        )
-    )
-
-    assert run_detector(detector, frame).detections == ()
-
-
-def test_template_matching_detector_treats_direct_subset_region_as_explicit_roi() -> None:
-    frame = _template_scene_frame(scale=1)
-    image = FrameImage.from_captured_frame(frame)
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="badge",
-                image=_template_image(),
-                min_confidence=0.99,
-            ),
-        )
-    )
-
-    detections = detector.detect(
+    match = find_template(
         image,
-        region=Rect(left=1, top=1, width=3, height=3),
-        request=DetectionRequest(),
+        _template_image(),
+        min_confidence=0.99,
+        scales=(1.0, 2.0),
     )
 
-    assert [detection.label for detection in detections] == ["badge"]
-
-
-def test_template_matching_detector_respects_request_and_template_rois() -> None:
-    frame = _template_scene_frame(scale=1)
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="badge",
-                image=_template_image(),
-                min_confidence=0.99,
-                region=Rect(left=0, top=0, width=1, height=1),
-            ),
+    assert isinstance(match, Match)
+    assert match.bounds == Rect(left=1, top=1, width=4, height=4)
+    assert match.center == Point(x=3, y=3)
+    assert match.confidence == pytest.approx(1.0)
+    assert match.scale == pytest.approx(2.0)
+    assert match.rotation == pytest.approx(0.0)
+    assert (
+        find_template(
+            image,
+            _template_image(),
+            region=Rect(left=0, top=0, width=1, height=1),
+            min_confidence=0.99,
+            scales=(1.0, 2.0),
         )
+        is None
     )
 
-    assert run_detector(detector, frame).detections == ()
 
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="badge",
-                image=_template_image(),
-                min_confidence=0.99,
-                region=Rect(left=1, top=1, width=3, height=3),
-            ),
-        )
+def test_find_template_supports_rotated_matches() -> None:
+    match = find_template(
+        _rotated_template_scene_image(rotation=90),
+        _asymmetric_template_image(),
+        min_confidence=0.99,
+        rotations=(0.0, 90.0),
     )
 
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(region=Rect(left=1, top=1, width=3, height=3)),
-    )
-
-    assert [detection.label for detection in result.detections] == ["badge"]
-
-
-def test_template_matching_detector_applies_request_labels_before_matching(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = _template_scene_frame(scale=1)
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="skip",
-                image=_template_image(),
-                min_confidence=0.99,
-                region=Rect(left=0, top=0, width=5, height=5),
-            ),
-            VisionTemplate(
-                label="badge",
-                image=_template_image(),
-                min_confidence=0.99,
-                region=Rect(left=0, top=0, width=5, height=5),
-            ),
-        )
-    )
-    matched_labels: list[str] = []
-
-    def fake_match(
-        image: FrameImage,
-        search_region: Rect,
-        template: VisionTemplate,
-    ) -> Detection:
-        del image, search_region
-        matched_labels.append(template.label)
-        return Detection(label=template.label, confidence=1.0)
-
-    monkeypatch.setattr(vision_detectors, "_match_template", fake_match)
-
-    result = run_detector(detector, frame, DetectionRequest(labels=("badge",)))
-
-    assert matched_labels == ["badge"]
-    assert [detection.label for detection in result.detections] == ["badge"]
+    assert isinstance(match, Match)
+    assert match.bounds == Rect(left=2, top=1, width=3, height=2)
+    assert match.center == Point(x=3, y=2)
+    assert match.confidence == pytest.approx(1.0)
+    assert match.scale == pytest.approx(1.0)
+    assert match.rotation == pytest.approx(90.0)
 
 
-def test_template_matching_detector_sorts_by_confidence_before_max_results(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = _template_scene_frame(scale=1)
-    detector = TemplateMatchingDetector(
-        templates=(
-            VisionTemplate(
-                label="weaker",
-                image=_template_image(),
-                min_confidence=0.5,
-                region=Rect(left=0, top=0, width=5, height=5),
-            ),
-            VisionTemplate(
-                label="stronger",
-                image=_template_image(),
-                min_confidence=0.5,
-                region=Rect(left=0, top=0, width=5, height=5),
-            ),
-        )
-    )
+def test_find_template_supports_frame_image_pil_path_and_threshold_alias(tmp_path) -> None:  # noqa: ANN001
+    image = _template_scene_image(scale=1, altered=True)
+    source_pil = image.to_pil_image()
+    template_pil = _template_image().to_pil_image()
+    source_path = tmp_path / "scene.png"
+    template_path = tmp_path / "badge.png"
 
-    def fake_match(
-        image: FrameImage,
-        search_region: Rect,
-        template: VisionTemplate,
-    ) -> Detection:
-        del image, search_region
-        return Detection(
-            label=template.label,
-            confidence=0.6 if template.label == "weaker" else 0.9,
-        )
+    try:
+        assert find_template(source_pil, template_pil, min_confidence=0.95) is None
 
-    monkeypatch.setattr(vision_detectors, "_match_template", fake_match)
+        source_pil.save(source_path)
+        template_pil.save(template_path)
+        match = find_template(source_path, template_path, threshold=0.4)
+    finally:
+        source_pil.close()
+        template_pil.close()
 
-    result = run_detector(
-        detector,
-        frame,
-        DetectionRequest(max_results=1, region=Rect(left=0, top=0, width=5, height=5)),
-    )
-
-    assert [detection.label for detection in result.detections] == ["stronger"]
+    assert isinstance(match, Match)
+    assert match.bounds == Rect(left=1, top=1, width=2, height=2)
+    assert match.confidence >= 0.4
 
 
-def _rgba_frame(*, frame_id: str | None = None) -> CapturedFrame:
-    return CapturedFrame(
+def test_find_template_validates_threshold_scales_and_rotations() -> None:
+    image = _template_scene_image(scale=1)
+    template = _template_image()
+
+    with pytest.raises(ValueError, match="min_confidence"):
+        find_template(image, template, min_confidence=1.1)
+
+    with pytest.raises(ValueError, match="scales"):
+        find_template(image, template, scales=(0.0,))
+
+    with pytest.raises(ValueError, match="rotations"):
+        find_template(image, template, rotations=(float("nan"),))
+
+
+def _rgba_image(*, frame_id: str | None = None) -> FrameImage:
+    return FrameImage(
+        size=Size(width=2, height=2),
+        pixel_format=PixelFormat.RGBA32,
         data=bytes(
             [
                 255,
@@ -484,12 +214,8 @@ def _rgba_frame(*, frame_id: str | None = None) -> CapturedFrame:
                 255,
             ]
         ),
-        metadata=FrameMetadata(
-            size=Size(width=2, height=2),
-            captured_at=datetime.now(UTC),
-            pixel_format=PixelFormat.RGBA32,
-            frame_id=frame_id,
-        ),
+        captured_at=datetime.now(UTC),
+        frame_id=frame_id,
     )
 
 
@@ -500,7 +226,18 @@ def _template_image() -> FrameImage:
     return FrameImage.from_pil_image(image)
 
 
-def _template_scene_frame(*, scale: int, altered: bool = False) -> CapturedFrame:
+def _asymmetric_template_image() -> FrameImage:
+    image = Image.new("RGBA", (2, 3), (20, 20, 20, 255))
+    image.putpixel((0, 0), (240, 240, 240, 255))
+    image.putpixel((1, 0), (40, 40, 40, 255))
+    image.putpixel((0, 1), (80, 80, 80, 255))
+    image.putpixel((1, 1), (160, 160, 160, 255))
+    image.putpixel((0, 2), (200, 200, 200, 255))
+    image.putpixel((1, 2), (120, 120, 120, 255))
+    return FrameImage.from_pil_image(image)
+
+
+def _template_scene_image(*, scale: int, altered: bool = False) -> FrameImage:
     template = _template_image().to_pil_image()
     scaled = template.resize(
         (template.width * scale, template.height * scale),
@@ -511,11 +248,23 @@ def _template_scene_frame(*, scale: int, altered: bool = False) -> CapturedFrame
     if altered:
         scene.putpixel((1, 1), (20, 20, 20, 255))
 
-    return CapturedFrame(
+    return FrameImage(
+        size=Size(width=scene.width, height=scene.height),
+        pixel_format=PixelFormat.RGBA32,
         data=scene.tobytes(),
-        metadata=FrameMetadata(
-            size=Size(width=scene.width, height=scene.height),
-            captured_at=datetime.now(UTC),
-            pixel_format=PixelFormat.RGBA32,
-        ),
+        captured_at=datetime.now(UTC),
+    )
+
+
+def _rotated_template_scene_image(*, rotation: float) -> FrameImage:
+    template = _asymmetric_template_image().to_pil_image()
+    rotated = template.rotate(rotation, expand=True, resample=Image.Resampling.NEAREST)
+    scene = Image.new("RGBA", (6, 6), (20, 20, 20, 255))
+    scene.paste(rotated, (2, 1))
+
+    return FrameImage(
+        size=Size(width=scene.width, height=scene.height),
+        pixel_format=PixelFormat.RGBA32,
+        data=scene.tobytes(),
+        captured_at=datetime.now(UTC),
     )

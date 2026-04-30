@@ -5,12 +5,12 @@ from __future__ import annotations
 import importlib
 
 SCAFFOLD_MODULES = (
-    "android_game_automator.core",
-    "android_game_automator.backends",
-    "android_game_automator.backends.adb",
+    "android_game_automator.types",
+    "android_game_automator.image",
     "android_game_automator.vision",
-    "android_game_automator.runtime",
+    "android_game_automator.ocr",
     "android_game_automator.artifacts",
+    "android_game_automator.adb",
     "botto",
 )
 

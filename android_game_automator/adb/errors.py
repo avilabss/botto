@@ -1,4 +1,4 @@
-"""ADB backend-specific exceptions."""
+"""ADB-specific exceptions."""
 
 from __future__ import annotations
 

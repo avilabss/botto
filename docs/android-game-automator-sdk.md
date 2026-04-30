@@ -1,16 +1,18 @@
 # Android Game Automator SDK Usage
 
-This repository currently ships an ADB-first SDK foundation plus a tiny `botto` reference app.
+This repository currently ships an ADB-first SDK foundation plus a tiny `botto`
+reference app. The SDK talks to Android through ADB only: it can launch/close
+apps, press keys, send input, and capture screenshots, but it does not read game
+internals or include Clash of Clans strategy automation.
 
 ## What is implemented
 
-- Device discovery with `AdbDeviceBackend`
-- Session metadata and current display inspection
-- Screenshot capture as `CapturedFrame`
-- ADB input command execution for tap, swipe, key press, and text entry
-- Local artifact persistence with `LocalArtifactRecorder`
-- ROI-first image utilities, template matching, and OCR helpers
-- Small async runtime helpers for retry and polling loops
+- Device discovery and session opening with `AdbDeviceBackend`
+- Async ADB sessions with `async with` cleanup
+- Screenshot capture with `session.screenshot()`
+- App lifecycle helpers: `session.launch_app(...)`, `session.close_app(...)`, and `session.key("HOME")`
+- Direct ADB input methods for tap, swipe, key press, and text entry
+- ROI-first image utilities, simple `find_template(...)` matching, function-first OCR helpers, and a local `ArtifactStore`
 
 ## ADB setup and verification
 
@@ -50,172 +52,172 @@ On Linux, if the phone is visible over USB but ADB cannot use it, the issue is
 often USB permissions or missing udev rules. Install your distro's Android udev
 rules (or add a vendor-ID rule), reload udev, and reconnect the phone.
 
-## Discover devices
+## Quick start: launch, capture, save, close
+
+Create an `AdbDeviceBackend`, list devices when you need to discover serials,
+and open a session. The example below selects the only connected usable ADB
+device through `backend.open_session()`. If you have more than one, use the
+serial shown by `adb devices -l` when calling `backend.open_session("serial")`.
+
+This example launches Clash of Clans, captures a screenshot, saves it, and closes
+the app. It intentionally avoids taps/swipes and does not automate gameplay.
 
 ```python
 import asyncio
 
-from android_game_automator.backends.adb import AdbDeviceBackend
+from android_game_automator.adb import AdbDeviceBackend
+from android_game_automator.artifacts import ArtifactStore
+
+
+CLASH_PACKAGE = "com.supercell.clashofclans"
 
 
 async def main() -> None:
+    artifacts = ArtifactStore("botto-output")
+
     backend = AdbDeviceBackend()
-    devices = await backend.list_devices()
-    for device in devices:
-        print(device.identity.device_id, device.metadata.get("adb.target_kind"))
+    async with await backend.open_session() as session:
+        await session.launch_app(CLASH_PACKAGE)
+        try:
+            image = await session.screenshot()
+            saved_path = artifacts.save_image("clash-of-clans", image)
+            print(f"saved screenshot to {saved_path}")
+        finally:
+            await session.close_app(CLASH_PACKAGE)
 
 
 asyncio.run(main())
 ```
 
-## Open a session and inspect it
+`quick_run.py` contains this same flow as a local learning harness.
+
+## App lifecycle helpers
+
+Use the lifecycle helpers when a script needs to foreground, background, or close
+an app through ADB:
 
 ```python
 import asyncio
 
-from android_game_automator.backends.adb import AdbDeviceBackend
+from android_game_automator.adb import AdbDeviceBackend
 
 
 async def main() -> None:
     backend = AdbDeviceBackend()
-    session = await backend.open_session("emulator-5554")
-    try:
-        print(session.info.session_id)
-        print(session.info.device.identity.display_name)
-
-        display = await session.get_display_state()
-        print(display.size.width, display.size.height, display.rotation_quadrants)
-    finally:
-        await session.close()
+    async with await backend.open_session("emulator-5554") as session:
+        await session.launch_app("com.example.game")
+        await session.key("HOME")
+        await session.close_app("com.example.game")
 
 
 asyncio.run(main())
 ```
 
-## Capture a frame and save an artifact
+## Direct input methods
+
+Use normalized display coordinates for taps and swipes. Methods complete
+successfully or raise the underlying validation/ADB error:
 
 ```python
 import asyncio
 
-from android_game_automator.artifacts.local import LocalArtifactRecorder
-from android_game_automator.backends.adb import AdbDeviceBackend
+from android_game_automator.adb import AdbDeviceBackend
 
 
 async def main() -> None:
-    backend = AdbDeviceBackend()
-    recorder = LocalArtifactRecorder("run-output")
-    session = await backend.open_session("emulator-5554")
-    try:
-        frame = await session.capture_frame()
-        record = await recorder.save_frame_image_artifact(
-            label="home-screen",
-            frame=frame,
-            metadata={"device_id": session.info.device.identity.device_id},
-        )
-        print(record.persisted_path)
-    finally:
-        await session.close()
+    async with await AdbDeviceBackend().open_session("emulator-5554") as session:
+        await session.tap(0.5, 0.5)
+        await session.swipe(0.2, 0.8, 0.8, 0.8, duration_ms=250)
+        await session.key("BACK")
+        await session.text("hello world")
 
 
 asyncio.run(main())
 ```
 
-## Execute input actions
+## Find UI elements with template matching
+
+Template matching compares a screenshot image against a small PNG you provide, such as
+an icon cropped from your own capture. Start with `find_template(...)` for quick
+scripts; source and template inputs may be `FrameImage` objects, PIL images, or paths.
 
 ```python
 import asyncio
+from pathlib import Path
 
-from android_game_automator.backends.adb import AdbDeviceBackend
-from android_game_automator.core import NormalizedPoint, TapAction
+from android_game_automator.adb import AdbDeviceBackend
+from android_game_automator.types import NormalizedRect
+from android_game_automator.vision import find_template
 
 
 async def main() -> None:
     backend = AdbDeviceBackend()
-    session = await backend.open_session("emulator-5554")
-    try:
-        result = await session.execute_input(TapAction(point=NormalizedPoint(x=0.5, y=0.5)))
-        print(result.status.value, result.message)
-    finally:
-        await session.close()
-
-
-asyncio.run(main())
-```
-
-## Read ROI pixels or OCR text
-
-```python
-import asyncio
-
-from android_game_automator.backends.adb import AdbDeviceBackend
-from android_game_automator.core import NormalizedPoint, NormalizedRect
-from android_game_automator.vision.image import FrameImage, probe_color
-from android_game_automator.vision.ocr import OcrService, RapidOcrEngine
-
-
-async def main() -> None:
-    backend = AdbDeviceBackend()
-    session = await backend.open_session("emulator-5554")
-    try:
-        frame = await session.capture_frame()
-        frame_image = FrameImage.from_captured_frame(frame)
-
-        is_green = probe_color(
-            frame_image,
-            NormalizedPoint(x=0.5, y=0.2),
-            expected=(0, 255, 0, 255),
-            tolerance=12,
+    async with await backend.open_session("emulator-5554") as session:
+        image = await session.screenshot()
+        match = find_template(
+            image,
+            Path("templates/settings-gear.png"),
+            min_confidence=0.90,
+            region=NormalizedRect(left=0.70, top=0.00, width=0.30, height=0.30),
         )
 
-        ocr = OcrService(engine=RapidOcrEngine())
-        result = ocr.read(
-            frame_image,
-            region=NormalizedRect(left=0.1, top=0.1, width=0.3, height=0.1),
-        )
-        print(is_green, result.text)
-    finally:
-        await session.close()
+        if match is None:
+            print("template not found")
+            return
+
+        print(f"found settings gear at ({match.center.x}, {match.center.y})")
 
 
 asyncio.run(main())
 ```
 
-## Use runtime helpers for bot loops
+Useful knobs:
+
+- `min_confidence` sets the acceptance threshold (`threshold` is accepted as an alias).
+- `region=NormalizedRect(...)` narrows the search area for speed and fewer false
+  positives.
+- `scales=(...)` and `rotations=(...)` are available when the template may render
+  at a few known sizes or orientations.
+- Returned `Match.bounds` and `Match.center` use absolute source-image pixels.
+
+## Simple OCR
+
+OCR is available through `read_text(...)` and `read_text_blocks(...)` with
+RapidOCR used internally. Keep OCR reads scoped to the smallest useful region
+when you can, or omit `region` to read the full screenshot.
 
 ```python
 import asyncio
 
-from android_game_automator.backends.adb import AdbDeviceBackend
-from android_game_automator.runtime import RetryPolicy, run_with_retry, wait_for
+from android_game_automator.adb import AdbDeviceBackend
+from android_game_automator.ocr import read_text
+from android_game_automator.types import NormalizedRect
 
 
 async def main() -> None:
     backend = AdbDeviceBackend()
-    session = await backend.open_session("emulator-5554")
-    checks = {"count": 0}
-
-    async def read_status() -> str:
-        checks["count"] += 1
-        return "ready" if checks["count"] >= 2 else "loading"
-
-    try:
-        ready_state = await wait_for(
-            probe=read_status,
-            timeout_seconds=5.0,
-            interval_seconds=0.25,
-            is_complete=lambda value: value == "ready",
+    async with await backend.open_session("emulator-5554") as session:
+        image = await session.screenshot()
+        text = read_text(
+            image,
+            region=NormalizedRect(left=0.00, top=0.00, width=1.00, height=0.20),
         )
-        frame = await run_with_retry(
-            operation=session.capture_frame,
-            policy=RetryPolicy(max_attempts=3, delay_seconds=0.2),
-        )
-        print(ready_state, frame.metadata.size)
-    finally:
-        await session.close()
+        print(text)
 
 
 asyncio.run(main())
 ```
+
+## Advanced APIs
+
+The concrete module APIs are the practical starting point for scripts and
+reusable SDK pieces:
+
+- `AdbDeviceBackend` for explicit device listing and session opening.
+- Direct `AdbDeviceSession` methods (`tap`, `swipe`, `key`, `text`) for input.
+- `find_template(...)` for one-off template matching against a screenshot,
+  optional ROI, and known scale/rotation variants.
+- `ArtifactStore` for saving debug screenshots, JSON, text, and binary artifacts with a manifest.
 
 ## Reference app mapping
 
@@ -223,6 +225,6 @@ asyncio.run(main())
 
 - `botto devices` demonstrates backend discovery.
 - `botto session` demonstrates session inspection.
-- `botto capture` demonstrates capture plus artifact persistence.
+- `botto capture` demonstrates capture plus `ArtifactStore` PNG persistence.
 
 That keeps `android_game_automator` as the reusable SDK boundary while still providing a real app entrypoint for future bot work.

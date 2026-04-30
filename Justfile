@@ -11,8 +11,7 @@ typecheck:
 test:
     uv run pytest
 
-check: 
-    lint typecheck test
+check: lint typecheck test
 
 quick-run:
     uv run python quick_run.py

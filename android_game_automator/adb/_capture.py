@@ -8,13 +8,14 @@ from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
 
-from android_game_automator.core import CapturedFrame, FrameMetadata, PixelFormat, Size
+from android_game_automator.image import FrameImage
+from android_game_automator.types import PixelFormat, Size
 
 from .errors import AdbFrameCaptureError
 
 
-def decode_screencap_png(png_bytes: bytes) -> CapturedFrame:
-    """Decode an adb screencap PNG into the SDK frame model."""
+def decode_screencap_png(png_bytes: bytes) -> FrameImage:
+    """Decode an adb screencap PNG into the SDK image model."""
     if not png_bytes:
         raise AdbFrameCaptureError("ADB screencap returned empty output.")
 
@@ -22,14 +23,12 @@ def decode_screencap_png(png_bytes: bytes) -> CapturedFrame:
         with Image.open(BytesIO(png_bytes)) as image:
             rgba_image = image.convert("RGBA")
             try:
-                return CapturedFrame(
+                return FrameImage(
+                    size=Size(width=rgba_image.width, height=rgba_image.height),
+                    pixel_format=PixelFormat.RGBA32,
                     data=rgba_image.tobytes(),
-                    metadata=FrameMetadata(
-                        size=Size(width=rgba_image.width, height=rgba_image.height),
-                        captured_at=datetime.now(UTC),
-                        pixel_format=PixelFormat.RGBA32,
-                        frame_id=f"adb-frame:{uuid4().hex}",
-                    ),
+                    captured_at=datetime.now(UTC),
+                    frame_id=f"adb-frame:{uuid4().hex}",
                 )
             finally:
                 rgba_image.close()

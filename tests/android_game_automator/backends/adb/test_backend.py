@@ -8,38 +8,21 @@ from dataclasses import dataclass
 from io import BytesIO
 
 import pytest
-from android_game_automator.backends.adb._types import AdbListedDevice
-from PIL import Image
-
-from android_game_automator.backends.adb import (
-    AdbCoordinateOffset,
-    AdbDefaultViewports,
+from android_game_automator.adb import (
     AdbDeviceBackend,
     AdbDeviceDiscoveryError,
     AdbDeviceUnavailableError,
     AdbDisplayState,
     AdbFrameCaptureError,
-    AdbInputHumanizationPolicy,
     AdbSessionClosedError,
-    build_adb_input_command,
-    build_default_viewports,
 )
-from android_game_automator.core import (
-    AsyncDeviceBackend,
-    AsyncDeviceSession,
-    AsyncFrameCapturer,
-    AsyncInputExecutor,
-    Capability,
-    InputStatus,
-    KeyPressAction,
+from android_game_automator.adb._types import AdbListedDevice
+from android_game_automator.types import (
     NormalizedPoint,
     PixelFormat,
     Point,
-    Size,
-    SwipeAction,
-    TapAction,
-    TextEntryAction,
 )
+from PIL import Image
 
 
 def make_png_bytes(size: tuple[int, int], rgba: tuple[int, int, int, int]) -> bytes:
@@ -206,7 +189,7 @@ class FakeAdbClient:
         return self._devices[serial]
 
 
-def test_backend_protocol_conformance_and_device_listing() -> None:
+def test_backend_lists_usable_devices_from_adb_server() -> None:
     client = FakeAdbClient(
         device_list_payload=(
             "emulator-5554\tdevice\n"
@@ -219,8 +202,6 @@ def test_backend_protocol_conformance_and_device_listing() -> None:
     )
     backend = AdbDeviceBackend(client=client)
 
-    assert isinstance(backend, AsyncDeviceBackend)
-
     devices = asyncio.run(backend.list_devices())
     assert tuple(device.identity.device_id for device in devices) == (
         "emulator-5554",
@@ -228,8 +209,6 @@ def test_backend_protocol_conformance_and_device_listing() -> None:
     )
     assert devices[0].metadata["adb.target_kind"] == "emulator"
     assert devices[1].metadata["adb.target_kind"] == "physical"
-    assert devices[0].capabilities.supports(Capability.INPUT_TAP)
-    assert len(devices[0].capabilities) == 5
     assert client.list_calls == 0
     assert client.server_connections[0].sent == [b"000chost:devices"]
     assert client.server_connections[0].closed
@@ -260,7 +239,7 @@ def test_device_listing_contains_transport_errors_in_backend_exception() -> None
         asyncio.run(backend.list_devices())
 
 
-def test_open_session_builds_metadata_and_exposes_session_contract() -> None:
+def test_open_session_builds_metadata_and_returns_session() -> None:
     device = FakeAdbDevice(
         "emulator-5554",
         shell_outputs={
@@ -279,15 +258,11 @@ def test_open_session_builds_metadata_and_exposes_session_contract() -> None:
 
     session = asyncio.run(backend.open_session("emulator-5554"))
 
-    assert isinstance(session, AsyncDeviceSession)
-    assert isinstance(session, AsyncFrameCapturer)
-    assert isinstance(session, AsyncInputExecutor)
     assert session.info.device.identity.backend_name == "adb"
     assert session.info.device.identity.display_name == "Google Pixel 8"
     assert session.info.device.metadata["adb.model"] == "Pixel 8"
     assert session.info.device.metadata["adb.android_release"] == "14"
     assert session.info.metadata["adb.target_kind"] == "emulator"
-    assert session.info.device.capabilities.supports(Capability.FRAME_CAPTURE)
     assert device.getprop_calls == []
     assert {
         ("getprop ro.product.manufacturer", "utf-8"),
@@ -297,7 +272,42 @@ def test_open_session_builds_metadata_and_exposes_session_contract() -> None:
     }.issubset(set(device.shell_calls))
 
 
-def test_open_session_declares_frame_capture_capability() -> None:
+def test_open_session_without_device_id_uses_only_connected_usable_device() -> None:
+    device = FakeAdbDevice("emulator-5554")
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            device_list_payload="emulator-5554\tdevice\noffline-serial\toffline\n",
+            list_error=AssertionError("AdbClient.list must not be used for discovery"),
+            devices={"emulator-5554": device},
+        )
+    )
+
+    session = asyncio.run(backend.open_session())
+
+    assert session.info.device.identity.device_id == "emulator-5554"
+
+
+def test_open_session_without_device_id_requires_exactly_one_usable_device() -> None:
+    empty_backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            device_list_payload="offline-serial\toffline\n",
+            list_error=AssertionError("AdbClient.list must not be used for discovery"),
+        )
+    )
+    multiple_backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            device_list_payload="emulator-5554\tdevice\nemulator-5556\tdevice\n",
+            list_error=AssertionError("AdbClient.list must not be used for discovery"),
+        )
+    )
+
+    with pytest.raises(AdbDeviceUnavailableError, match="No usable ADB devices"):
+        asyncio.run(empty_backend.open_session())
+    with pytest.raises(AdbDeviceUnavailableError, match="Multiple usable ADB devices"):
+        asyncio.run(multiple_backend.open_session())
+
+
+def test_session_async_context_manager_closes_session() -> None:
     device = FakeAdbDevice("emulator-5554")
     backend = AdbDeviceBackend(
         client=FakeAdbClient(
@@ -305,114 +315,79 @@ def test_open_session_declares_frame_capture_capability() -> None:
             devices={"emulator-5554": device},
         )
     )
-
     session = asyncio.run(backend.open_session("emulator-5554"))
 
-    assert session.info.device.capabilities.supports(Capability.FRAME_CAPTURE)
-    assert session.info.device.capabilities.supports(Capability.INPUT_TAP)
-    assert session.info.device.capabilities.supports(Capability.INPUT_SWIPE)
-    assert session.info.device.capabilities.supports(Capability.INPUT_KEY_PRESS)
-    assert session.info.device.capabilities.supports(Capability.INPUT_TEXT_ENTRY)
+    async def use_session() -> bool:
+        async with session as active:
+            assert active is session
+            assert await active.is_healthy()
+        return await session.is_healthy()
+
+    assert not asyncio.run(use_session())
 
 
-def test_build_adb_input_command_generates_expected_shell_commands() -> None:
-    viewport = AdbDisplayState(size=Size(width=1080, height=1920), rotation_quadrants=0).viewport
-
-    tap = build_adb_input_command(TapAction(point=Point(x=10, y=20)), viewport=viewport)
-    hold = build_adb_input_command(
-        TapAction(point=Point(x=10, y=20), hold_ms=300),
-        viewport=viewport,
+def test_session_convenience_methods_execute_expected_adb_commands() -> None:
+    device = FakeAdbDevice(
+        "emulator-5554",
+        shell_outputs={
+            "dumpsys input": "SurfaceOrientation: 0",
+            "wm size": "Physical size: 100x200",
+        },
     )
-    swipe = build_adb_input_command(
-        SwipeAction(start=Point(x=1, y=2), end=Point(x=30, y=40), duration_ms=250),
-        viewport=viewport,
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
     )
-    key = build_adb_input_command(KeyPressAction(key="back"))
-    text = build_adb_input_command(TextEntryAction(text="hello world"))
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
 
-    assert tap.shell_command == "input tap 10 20"
-    assert hold.shell_command == "input swipe 10 20 10 20 300"
-    assert swipe.shell_command == "input swipe 1 2 30 40 250"
-    assert key.shell_command == "input keyevent KEYCODE_BACK"
-    assert text.shell_command == "input text 'hello%sworld'"
+    asyncio.run(session.tap(0.5, 0.25, hold_ms=50))
+    asyncio.run(session.swipe(0.0, 0.0, 1.0, 1.0))
+    asyncio.run(session.key("BACK"))
+    asyncio.run(session.text("hello world"))
+    asyncio.run(session.launch_app("com.example.game"))
+    asyncio.run(session.close_app("com.example.game"))
+    asyncio.run(session.key("HOME"))
+
+    assert [call[0] for call in device.shell_calls] == [
+        "dumpsys input",
+        "wm size",
+        "input swipe 50 50 50 50 50",
+        "dumpsys input",
+        "wm size",
+        "input swipe 0 0 99 199 120",
+        "input keyevent KEYCODE_BACK",
+        "input text hello%sworld",
+        "monkey -p com.example.game -c android.intent.category.LAUNCHER 1",
+        "am force-stop com.example.game",
+        "input keyevent KEYCODE_HOME",
+    ]
 
 
-def test_build_adb_input_command_preserves_literal_percent_and_backslash() -> None:
-    text = build_adb_input_command(TextEntryAction(text=r"50% done \\ path"))
-
-    assert text.shell_command == r"input text '50%%sdone%s\\%spath'"
-    assert text.rejection_message is None
-
-
-def test_build_adb_input_command_rejects_literal_percent_s_sequence() -> None:
-    text = build_adb_input_command(TextEntryAction(text="literal %s payload"))
-
-    assert text.shell_command == ""
-    assert "cannot represent faithfully" in (text.rejection_message or "")
-
-
-def test_build_adb_input_command_allows_absolute_swipe_without_viewport() -> None:
-    swipe = build_adb_input_command(
-        SwipeAction(start=Point(x=1, y=2), end=Point(x=30, y=40), duration_ms=250)
+def test_session_rejects_unsafe_package_names_before_shelling_out() -> None:
+    device = FakeAdbDevice("emulator-5554")
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
     )
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
 
-    assert swipe.shell_command == "input swipe 1 2 30 40 250"
+    with pytest.raises(ValueError, match="package_name"):
+        asyncio.run(session.launch_app("com.example.game; input keyevent HOME"))
+    with pytest.raises(ValueError, match="package_name"):
+        asyncio.run(session.close_app("com.example.game && id"))
+    with pytest.raises(ValueError, match="package_name"):
+        asyncio.run(session.launch_app("comexample"))
 
-
-def test_build_adb_input_command_maps_normalized_coordinates_through_viewport() -> None:
-    viewport = AdbDisplayState(
-        size=Size(width=1080, height=1920),
-        rotation_quadrants=0,
-    ).viewport
-
-    tap = build_adb_input_command(
-        TapAction(point=NormalizedPoint(x=0.5, y=0.25)),
-        viewport=viewport,
-    )
-    swipe = build_adb_input_command(
-        SwipeAction(
-            start=NormalizedPoint(x=0.0, y=0.0),
-            end=NormalizedPoint(x=1.0, y=1.0),
-            duration_ms=120,
-        ),
-        viewport=viewport,
-    )
-
-    assert tap.shell_command == "input tap 540 480"
-    assert swipe.shell_command == "input swipe 0 0 1079 1919 120"
+    assert device.shell_calls == []
 
 
-def test_build_adb_input_command_applies_deterministic_humanization() -> None:
-    viewport = AdbDisplayState(
-        size=Size(width=100, height=200),
-        rotation_quadrants=0,
-    ).viewport
-    humanization = AdbInputHumanizationPolicy(
-        coordinate_offset_px=AdbCoordinateOffset(x=3, y=-4),
-        duration_scale=1.25,
-        duration_offset_ms=5,
-    )
-
-    tap = build_adb_input_command(
-        TapAction(point=NormalizedPoint(x=0.5, y=0.5), hold_ms=80),
-        viewport=viewport,
-        humanization=humanization,
-    )
-    swipe = build_adb_input_command(
-        SwipeAction(
-            start=Point(x=0, y=0),
-            end=Point(x=99, y=199),
-            duration_ms=120,
-        ),
-        viewport=viewport,
-        humanization=humanization,
-    )
-
-    assert tap.shell_command == "input swipe 53 96 53 96 105"
-    assert swipe.shell_command == "input swipe 3 0 99 195 155"
-
-
-def test_execute_input_returns_failed_result_when_adb_command_errors() -> None:
+def test_direct_input_methods_raise_when_adb_command_errors() -> None:
     device = FakeAdbDevice(
         "emulator-5554",
         shell_outputs={
@@ -429,17 +404,34 @@ def test_execute_input_returns_failed_result_when_adb_command_errors() -> None:
     )
 
     session = asyncio.run(backend.open_session("emulator-5554"))
-    result = asyncio.run(session.execute_input(TapAction(point=NormalizedPoint(x=0.5, y=0.5))))
 
-    assert result.status is InputStatus.FAILED
-    assert result.message == "input transport failed"
+    with pytest.raises(RuntimeError, match="input transport failed"):
+        asyncio.run(session.tap(0.5, 0.5))
 
 
-def test_execute_input_allows_absolute_tap_when_display_state_probe_fails() -> None:
+def test_direct_input_rejects_invalid_android_key_identifier() -> None:
+    device = FakeAdbDevice("emulator-5554")
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+
+    with pytest.raises(ValueError, match="letters, digits, or underscores"):
+        asyncio.run(session.key("bad key"))
+
+    assert device.shell_calls == []
+
+
+def test_direct_input_lets_android_reject_unknown_safe_symbolic_keys() -> None:
     device = FakeAdbDevice(
         "emulator-5554",
         shell_outputs={
-            "input tap 10 20": "",
+            "input keyevent KEYCODE_DEFINITELY_NOT_A_REAL_KEY": RuntimeError("unknown key"),
         },
     )
     backend = AdbDeviceBackend(
@@ -451,30 +443,18 @@ def test_execute_input_allows_absolute_tap_when_display_state_probe_fails() -> N
 
     session = asyncio.run(backend.open_session("emulator-5554"))
     device.shell_calls.clear()
-    result = asyncio.run(session.execute_input(TapAction(point=Point(x=10, y=20))))
 
-    assert result.status is InputStatus.APPLIED
-    assert device.shell_calls == [("input tap 10 20", "utf-8")]
+    with pytest.raises(RuntimeError, match="unknown key"):
+        asyncio.run(session.key("definitely_not_a_real_key"))
+
+    assert device.shell_calls == [("input keyevent KEYCODE_DEFINITELY_NOT_A_REAL_KEY", "utf-8")]
 
 
-def test_execute_input_rejects_invalid_android_key_identifier() -> None:
-    device = FakeAdbDevice("emulator-5554")
-    backend = AdbDeviceBackend(
-        client=FakeAdbClient(
-            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
-            devices={"emulator-5554": device},
-        )
+def test_direct_text_input_quotes_shell_arguments_and_rejects_ambiguous_text() -> None:
+    device = FakeAdbDevice(
+        "emulator-5554",
+        shell_outputs={r"input text '50%%sdone%s\\%spath'": ""},
     )
-
-    session = asyncio.run(backend.open_session("emulator-5554"))
-    result = asyncio.run(session.execute_input(KeyPressAction(key="bad key")))
-
-    assert result.status is InputStatus.REJECTED
-    assert "Unsupported Android key identifier" in (result.message or "")
-
-
-def test_execute_input_rejects_unknown_android_symbolic_key() -> None:
-    device = FakeAdbDevice("emulator-5554")
     backend = AdbDeviceBackend(
         client=FakeAdbClient(
             listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
@@ -484,32 +464,15 @@ def test_execute_input_rejects_unknown_android_symbolic_key() -> None:
 
     session = asyncio.run(backend.open_session("emulator-5554"))
     device.shell_calls.clear()
-    result = asyncio.run(session.execute_input(KeyPressAction(key="definitely_not_a_real_key")))
 
-    assert result.status is InputStatus.REJECTED
-    assert "Unsupported Android key identifier" in (result.message or "")
-    assert device.shell_calls == []
+    asyncio.run(session.text(r"50% done \\ path"))
+    with pytest.raises(ValueError, match="cannot represent"):
+        asyncio.run(session.text("literal %s payload"))
 
-
-def test_execute_input_rejects_unrepresentable_text_payload() -> None:
-    device = FakeAdbDevice("emulator-5554")
-    backend = AdbDeviceBackend(
-        client=FakeAdbClient(
-            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
-            devices={"emulator-5554": device},
-        )
-    )
-
-    session = asyncio.run(backend.open_session("emulator-5554"))
-    device.shell_calls.clear()
-    result = asyncio.run(session.execute_input(TextEntryAction(text="literal %s payload")))
-
-    assert result.status is InputStatus.REJECTED
-    assert "cannot represent faithfully" in (result.message or "")
-    assert device.shell_calls == []
+    assert device.shell_calls == [(r"input text '50%%sdone%s\\%spath'", "utf-8")]
 
 
-def test_capture_frame_prefers_exec_out_and_decodes_rgba_pixels() -> None:
+def test_screenshot_prefers_exec_out_and_decodes_rgba_pixels() -> None:
     png_bytes = make_png_bytes((2, 1), (12, 34, 56, 78))
     device = FakeAdbDevice(
         "emulator-5554",
@@ -529,19 +492,20 @@ def test_capture_frame_prefers_exec_out_and_decodes_rgba_pixels() -> None:
 
     session = asyncio.run(backend.open_session("emulator-5554"))
     device.shell_calls.clear()
-    frame = asyncio.run(session.capture_frame())
+    image = asyncio.run(session.screenshot())
 
-    assert frame.metadata.size.width == 2
-    assert frame.metadata.size.height == 1
-    assert frame.metadata.pixel_format is PixelFormat.RGBA32
-    assert frame.data == bytes((12, 34, 56, 78, 12, 34, 56, 78))
-    assert frame.metadata.frame_id is not None
+    assert image.size.width == 2
+    assert image.size.height == 1
+    assert image.pixel_format is PixelFormat.RGBA32
+    assert image.data == bytes((12, 34, 56, 78, 12, 34, 56, 78))
+    assert image.frame_id is not None
+    assert not hasattr(session, "capture" + "_frame")
     assert device.transport_calls == [None]
     assert device.transport_connections[0].sent_commands == ["exec:screencap -p"]
     assert device.shell_calls == []
 
 
-def test_capture_frame_falls_back_to_raw_shell_screencap_when_exec_fails() -> None:
+def test_screenshot_falls_back_to_raw_shell_screencap_when_exec_fails() -> None:
     png_bytes = make_png_bytes((1, 1), (7, 8, 9, 255))
     device = FakeAdbDevice(
         "emulator-5555",
@@ -560,16 +524,16 @@ def test_capture_frame_falls_back_to_raw_shell_screencap_when_exec_fails() -> No
     )
 
     session = asyncio.run(backend.open_session("emulator-5555"))
-    frame = asyncio.run(session.capture_frame())
+    image = asyncio.run(session.screenshot())
 
-    assert frame.metadata.size.width == 1
-    assert frame.metadata.size.height == 1
-    assert frame.data == bytes((7, 8, 9, 255))
+    assert image.size.width == 1
+    assert image.size.height == 1
+    assert image.data == bytes((7, 8, 9, 255))
     assert device.transport_calls == [None]
     assert device.shell_calls[-1] == ("screencap -p", None)
 
 
-def test_capture_frame_falls_back_to_shell_screencap_when_exec_out_fails() -> None:
+def test_screenshot_falls_back_to_shell_screencap_when_exec_out_fails() -> None:
     png_bytes = make_png_bytes((1, 2), (90, 80, 70, 255)).replace(b"\n", b"\r\n")
     device = FakeAdbDevice(
         "emulator-5556",
@@ -588,17 +552,17 @@ def test_capture_frame_falls_back_to_shell_screencap_when_exec_out_fails() -> No
     )
 
     session = asyncio.run(backend.open_session("emulator-5556"))
-    frame = asyncio.run(session.capture_frame())
+    image = asyncio.run(session.screenshot())
 
-    assert frame.metadata.size.width == 1
-    assert frame.metadata.size.height == 2
-    assert frame.metadata.pixel_format is PixelFormat.RGBA32
-    assert frame.data == bytes((90, 80, 70, 255, 90, 80, 70, 255))
+    assert image.size.width == 1
+    assert image.size.height == 2
+    assert image.pixel_format is PixelFormat.RGBA32
+    assert image.data == bytes((90, 80, 70, 255, 90, 80, 70, 255))
     assert device.transport_calls == [None]
     assert device.shell_calls[-1] == ("screencap -p", None)
 
 
-def test_capture_frame_raises_when_adb_output_is_not_a_valid_png() -> None:
+def test_screenshot_raises_when_adb_output_is_not_a_valid_png() -> None:
     device = FakeAdbDevice(
         "emulator-5558",
         shell_outputs={
@@ -618,7 +582,7 @@ def test_capture_frame_raises_when_adb_output_is_not_a_valid_png() -> None:
     session = asyncio.run(backend.open_session("emulator-5558"))
 
     with pytest.raises(AdbFrameCaptureError):
-        asyncio.run(session.capture_frame())
+        asyncio.run(session.screenshot())
 
 
 def test_open_session_rejects_non_ready_device_state() -> None:
@@ -669,6 +633,10 @@ def test_session_reports_health_orientation_and_display_state() -> None:
     assert display_state.rotation_quadrants == 1
     assert display_state.size.width == 1920
     assert display_state.size.height == 1080
+    assert display_state.viewport.map_point(NormalizedPoint(x=1.0, y=1.0)) == Point(
+        x=1919,
+        y=1079,
+    )
 
 
 def test_session_falls_back_to_dumpsys_display_for_rotation_and_size() -> None:
@@ -771,38 +739,6 @@ def test_rotation_quadrants_do_not_imply_portrait_for_landscape_native_device() 
     assert not hasattr(display_state, "orientation")
 
 
-def test_build_default_viewports_exposes_full_frame_and_display_regions() -> None:
-    png_bytes = make_png_bytes((720, 1280), (1, 2, 3, 255))
-    device = FakeAdbDevice(
-        "emulator-5554",
-        shell_outputs={
-            "dumpsys input": "SurfaceOrientation: 1",
-            "wm size": "Physical size: 1080x1920",
-        },
-        transport_outputs={
-            "exec:screencap -p": png_bytes,
-        },
-    )
-    backend = AdbDeviceBackend(
-        client=FakeAdbClient(
-            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
-            devices={"emulator-5554": device},
-        )
-    )
-    session = asyncio.run(backend.open_session("emulator-5554"))
-
-    frame = asyncio.run(session.capture_frame())
-    display_state = asyncio.run(session.get_display_state())
-    viewports = build_default_viewports(frame, display_state)
-
-    assert isinstance(viewports, AdbDefaultViewports)
-    assert viewports.frame.region.width == 720
-    assert viewports.frame.region.height == 1280
-    assert viewports.display.region.width == 1920
-    assert viewports.display.region.height == 1080
-    assert display_state.viewport.map_point(NormalizedPoint(x=1.0, y=1.0)) == Point(x=1919, y=1079)
-
-
 def test_session_close_is_idempotent_and_blocks_display_calls() -> None:
     png_bytes = make_png_bytes((1, 1), (1, 2, 3, 255))
     device = FakeAdbDevice(
@@ -832,6 +768,6 @@ def test_session_close_is_idempotent_and_blocks_display_calls() -> None:
     with pytest.raises(AdbSessionClosedError):
         asyncio.run(session.get_display_state())
     with pytest.raises(AdbSessionClosedError):
-        asyncio.run(session.capture_frame())
+        asyncio.run(session.screenshot())
     with pytest.raises(AdbSessionClosedError):
-        asyncio.run(session.execute_input(KeyPressAction(key="back")))
+        asyncio.run(session.key("back"))

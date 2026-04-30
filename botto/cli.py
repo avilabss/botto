@@ -8,43 +8,32 @@ import json
 import sys
 from collections.abc import Sequence
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol, TextIO
 
-from android_game_automator.artifacts.local import LocalArtifactRecorder
-from android_game_automator.backends import AdbDeviceBackend
-from android_game_automator.core import (
-    ArtifactRecord,
-    AsyncDeviceSession,
-    AsyncFrameCapturer,
-    CapturedFrame,
-    DeviceInfo,
-)
+from android_game_automator.adb import AdbDeviceBackend
+from android_game_automator.artifacts import ArtifactStore
+from android_game_automator.image import FrameImage
+from android_game_automator.types import DeviceInfo, SessionInfo
+
+
+class _Session(Protocol):
+    @property
+    def info(self) -> SessionInfo: ...
+
+    async def close(self) -> None: ...
+
+    async def screenshot(self) -> FrameImage: ...
 
 
 class _Backend(Protocol):
     async def list_devices(self) -> tuple[DeviceInfo, ...]: ...
 
-    async def open_session(self, device_id: str) -> AsyncDeviceSession: ...
-
-
-class _Recorder(Protocol):
-    async def save_frame_image_artifact(
-        self,
-        *,
-        label: str,
-        frame: CapturedFrame,
-        metadata: dict[str, str] | None = None,
-        artifact_id: str | None = None,
-    ) -> ArtifactRecord: ...
+    async def open_session(self, device_id: str | None = None) -> _Session: ...
 
 
 class _BackendFactory(Protocol):
     def __call__(self) -> _Backend: ...
-
-
-class _RecorderFactory(Protocol):
-    def __call__(self, root: Path) -> _Recorder: ...
 
 
 class CliError(Exception):
@@ -53,7 +42,7 @@ class CliError(Exception):
 
 def _package_version() -> str:
     try:
-        return metadata.version("android-game-automator")
+        return metadata.version("botto")
     except metadata.PackageNotFoundError:
         return "0.0.0+local"
 
@@ -98,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     capture_parser = subparsers.add_parser(
         "capture",
-        help="Capture a frame and persist it through the SDK artifact recorder.",
+        help="Capture a screenshot and save it as a PNG file.",
     )
     capture_parser.add_argument(
         "--device",
@@ -107,12 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     capture_parser.add_argument(
         "--output-dir",
         default=".botto-output",
-        help="Directory where the artifact recorder writes output.",
+        help="Directory where the PNG screenshot is saved.",
     )
     capture_parser.add_argument(
         "--label",
         default="device-capture",
-        help="Artifact label for the saved screenshot.",
+        help="Filename stem for the saved screenshot; '.png' is appended.",
     )
     capture_parser.add_argument(
         "--json",
@@ -126,7 +115,6 @@ def run(
     argv: Sequence[str] | None = None,
     *,
     backend_factory: _BackendFactory = AdbDeviceBackend,
-    recorder_factory: _RecorderFactory = LocalArtifactRecorder,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
@@ -146,7 +134,6 @@ def run(
             _run_command(
                 args,
                 backend_factory=backend_factory,
-                recorder_factory=recorder_factory,
                 stdout=resolved_stdout,
             )
         )
@@ -162,7 +149,6 @@ async def _run_command(
     args: argparse.Namespace,
     *,
     backend_factory: _BackendFactory,
-    recorder_factory: _RecorderFactory,
     stdout: TextIO,
 ) -> int:
     backend = backend_factory()
@@ -182,37 +168,37 @@ async def _run_command(
         return 0
 
     if args.command == "capture":
+        _validate_capture_label(args.label)
+        artifact_store = ArtifactStore(Path(args.output_dir))
         session = await _open_selected_session(backend, requested_device_id=args.device)
         try:
-            frame_capturer = _require_frame_capturer(session)
-            frame = await frame_capturer.capture_frame()
-            recorder = recorder_factory(Path(args.output_dir))
-            record = await recorder.save_frame_image_artifact(
-                label=args.label,
-                frame=frame,
-                metadata={
-                    "device_id": session.info.device.identity.device_id,
-                    "session_id": session.info.session_id,
-                },
-            )
+            image = await session.screenshot()
+            try:
+                saved_path = artifact_store.save_image(
+                    args.label,
+                    image,
+                    metadata=_capture_artifact_metadata(session=session, image=image),
+                )
+            except ValueError as exc:
+                raise CliError(str(exc)) from exc
         finally:
             await session.close()
         _write_payload(
             {
                 "device_id": session.info.device.identity.device_id,
                 "session_id": session.info.session_id,
-                "artifact_id": record.artifact_id,
-                "artifact_kind": record.kind.value,
-                "persisted_path": record.persisted_path,
-                "output_dir": str(Path(args.output_dir)),
+                "saved_path": str(saved_path),
+                "output_dir": str(artifact_store.root),
                 "frame": {
                     "size": {
-                        "width": frame.metadata.size.width,
-                        "height": frame.metadata.size.height,
+                        "width": image.size.width,
+                        "height": image.size.height,
                     },
-                    "pixel_format": frame.metadata.pixel_format.value,
-                    "captured_at": frame.metadata.captured_at.isoformat(),
-                    "frame_id": frame.metadata.frame_id,
+                    "pixel_format": image.pixel_format.value,
+                    "captured_at": image.captured_at.isoformat()
+                    if image.captured_at is not None
+                    else None,
+                    "frame_id": image.frame_id,
                 },
             },
             as_json=args.json,
@@ -227,22 +213,35 @@ async def _open_selected_session(
     backend: _Backend,
     *,
     requested_device_id: str | None,
-) -> AsyncDeviceSession:
-    if requested_device_id is not None:
-        return await backend.open_session(requested_device_id)
-
-    devices = await backend.list_devices()
-    if not devices:
-        raise CliError("No adb devices are available.")
-    if len(devices) > 1:
-        raise CliError("Multiple adb devices are available; pass --device.")
-    return await backend.open_session(devices[0].identity.device_id)
+) -> _Session:
+    return await backend.open_session(requested_device_id)
 
 
-def _require_frame_capturer(session: AsyncDeviceSession) -> AsyncFrameCapturer:
-    if not isinstance(session, AsyncFrameCapturer):
-        raise CliError("Selected session does not support frame capture.")
-    return session
+def _validate_capture_label(label: str) -> None:
+    cleaned_label = label.strip()
+    if not cleaned_label:
+        raise CliError("--label must be non-empty.")
+    if "\x00" in cleaned_label:
+        raise CliError("--label must not contain NUL bytes.")
+
+    label_path = Path(cleaned_label)
+    if (
+        label_path.name != cleaned_label
+        or PureWindowsPath(cleaned_label).name != cleaned_label
+        or cleaned_label in {".", ".."}
+    ):
+        raise CliError("--label must be a filename stem, not a path.")
+
+
+def _capture_artifact_metadata(*, session: _Session, image: FrameImage) -> dict[str, Any]:
+    return {
+        "device_id": session.info.device.identity.device_id,
+        "session_id": session.info.session_id,
+        "frame_id": image.frame_id,
+        "pixel_format": image.pixel_format.value,
+        "width": image.size.width,
+        "height": image.size.height,
+    }
 
 
 def _serialize_devices(devices: tuple[DeviceInfo, ...]) -> list[dict[str, Any]]:
@@ -251,14 +250,13 @@ def _serialize_devices(devices: tuple[DeviceInfo, ...]) -> list[dict[str, Any]]:
             "device_id": device.identity.device_id,
             "display_name": device.identity.display_name,
             "backend_name": device.identity.backend_name,
-            "capabilities": [capability.value for capability in device.capabilities],
             "metadata": dict(device.metadata),
         }
         for device in devices
     ]
 
 
-async def _serialize_session(session: AsyncDeviceSession) -> dict[str, Any]:
+async def _serialize_session(session: _Session) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "session_id": session.info.session_id,
         "started_at": session.info.started_at.isoformat(),
@@ -296,13 +294,13 @@ def _write_payload(payload: object, *, as_json: bool, stdout: TextIO) -> None:
             print(f"{device_id} | {display_name} | {target_kind}", file=stdout)
         return
 
-    if isinstance(payload, dict) and "artifact_id" in payload:
+    if isinstance(payload, dict) and "saved_path" in payload:
         frame_payload = payload.get("frame")
         size_payload = frame_payload.get("size") if isinstance(frame_payload, dict) else None
         if not isinstance(frame_payload, dict) or not isinstance(size_payload, dict):
             raise CliError("Capture payload is missing frame details.")
         print(
-            f"Captured {payload['device_id']} to {payload['persisted_path']} "
+            f"Captured {payload['device_id']} to {payload['saved_path']} "
             f"({size_payload['width']}x{size_payload['height']}, "
             f"{frame_payload['pixel_format']}).",
             file=stdout,

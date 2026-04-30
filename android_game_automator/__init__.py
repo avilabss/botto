@@ -1,1 +1,1 @@
-"""Android Game Automator reusable SDK."""
+"""Android Game Automator reusable SDK package."""

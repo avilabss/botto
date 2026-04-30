@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from android_game_automator.core import Size
+from android_game_automator.types import Size
 
 _ROTATION_PATTERNS = (
     re.compile(r"\bSurfaceOrientation:\s*(?P<value>\d+)\b"),

@@ -1,18 +1,18 @@
 [project]
-name = "android-game-automator"
+name = "botto"
 version = "0.1.0"
-description = "Reusable Android game automation SDK foundation."
+description = "An all purpose clash of clans bot."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "adbutils-async>=0.0.6",
     "numpy>=2.0.0",
+    "opencv-python>=4.13.0.92",
     "Pillow>=11.0.0",
     "rapidocr-onnxruntime>=1.4.4",
 ]
 
 [project.scripts]
-android-game-automator = "android_game_automator.cli:main"
 botto = "botto.cli:main"
 
 [dependency-groups]

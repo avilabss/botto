@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from importlib import metadata
 
 
 def test_botto_module_entrypoint_runs() -> None:
@@ -28,3 +29,15 @@ def test_botto_module_entrypoint_help() -> None:
 
     assert completed.returncode == 0
     assert "{devices,session,capture}" in completed.stdout
+
+
+def test_botto_module_entrypoint_version() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "botto", "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == f"botto {metadata.version('botto')}\n"
