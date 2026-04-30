@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 
+from botto.cli import run
+
 from android_game_automator.core import (
     ArtifactKind,
     ArtifactRecord,
@@ -19,7 +21,6 @@ from android_game_automator.core import (
     SessionInfo,
     Size,
 )
-from botto.cli import run
 
 
 def test_session_requires_explicit_device_when_multiple_devices_exist() -> None:

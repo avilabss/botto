@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from io import BytesIO
 
 import pytest
+from android_game_automator.backends.adb._types import AdbListedDevice
+from PIL import Image
+
 from android_game_automator.backends.adb import (
     AdbCoordinateOffset,
     AdbDefaultViewports,
@@ -21,7 +24,6 @@ from android_game_automator.backends.adb import (
     build_adb_input_command,
     build_default_viewports,
 )
-from android_game_automator.backends.adb._types import AdbListedDevice
 from android_game_automator.core import (
     AsyncDeviceBackend,
     AsyncDeviceSession,
@@ -38,7 +40,6 @@ from android_game_automator.core import (
     TapAction,
     TextEntryAction,
 )
-from PIL import Image
 
 
 def make_png_bytes(size: tuple[int, int], rgba: tuple[int, int, int, int]) -> bytes:

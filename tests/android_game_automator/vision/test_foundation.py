@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 
 import android_game_automator.vision.detectors as vision_detectors
 import pytest
+from PIL import Image
+
 from android_game_automator.core import (
     CapturedFrame,
     Detection,
@@ -34,7 +36,6 @@ from android_game_automator.vision import (
     resolve_region,
     run_detector,
 )
-from PIL import Image
 
 
 def test_frame_image_converts_captured_frame_into_pixel_array() -> None:

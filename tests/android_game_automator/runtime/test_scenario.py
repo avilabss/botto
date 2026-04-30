@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+
 from android_game_automator.runtime import (
     AttemptContext,
     CooldownTracker,

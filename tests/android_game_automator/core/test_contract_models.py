@@ -6,6 +6,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 
 import pytest
+
 from android_game_automator.core import (
     ArtifactKind,
     ArtifactRecord,

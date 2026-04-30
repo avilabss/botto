@@ -7,6 +7,9 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from android_game_automator.core.artifacts import ArtifactKind, ArtifactRecord
+from PIL import Image
+
 from android_game_automator.artifacts import LocalArtifactRecorder
 from android_game_automator.core import (
     CapturedFrame,
@@ -17,8 +20,6 @@ from android_game_automator.core import (
     PixelFormat,
     Size,
 )
-from android_game_automator.core.artifacts import ArtifactKind, ArtifactRecord
-from PIL import Image
 
 
 def test_local_artifact_recorder_persists_manifest_logs_and_debug_records(tmp_path) -> None:

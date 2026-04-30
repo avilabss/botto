@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from PIL import Image
+
 from android_game_automator.core import NormalizedRect, Rect, Size
 from android_game_automator.vision import (
     FrameImage,
@@ -14,7 +16,6 @@ from android_game_automator.vision import (
     RecognizedText,
     preprocess_ocr_region,
 )
-from PIL import Image
 
 
 class _FakeOcrEngine:
