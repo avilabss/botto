@@ -297,9 +297,7 @@ def _match_features(
 
     mask_values = [bool(value) for value in inlier_mask.ravel().tolist()]
     inlier_distances = [
-        match.distance
-        for match, is_inlier in zip(matches, mask_values, strict=True)
-        if is_inlier
+        match.distance for match, is_inlier in zip(matches, mask_values, strict=True) if is_inlier
     ]
     inlier_count = len(inlier_distances)
     if inlier_count < min_matches:
@@ -424,8 +422,7 @@ def _validate_visible_alpha_mask(mask: GrayImage) -> None:
     visible_pixels = _visible_mask_pixel_count(mask)
     if visible_pixels < _MIN_VISIBLE_ALPHA_PIXELS:
         raise ValueError(
-            "template alpha mask must contain at least "
-            f"{_MIN_VISIBLE_ALPHA_PIXELS} visible pixels"
+            f"template alpha mask must contain at least {_MIN_VISIBLE_ALPHA_PIXELS} visible pixels"
         )
 
 

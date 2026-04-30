@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO
 
+import android_game_automator.adb.device as adb_device_module
 import pytest
 from android_game_automator.adb._types import AdbListedDevice
 from android_game_automator.types import (
@@ -35,6 +36,16 @@ def make_png_bytes(size: tuple[int, int], rgba: tuple[int, int, int, int]) -> by
         return buffer.getvalue()
     finally:
         image.close()
+
+
+def make_raw_screencap_bytes(size: tuple[int, int], pixel_format: int, pixels: bytes) -> bytes:
+    width, height = size
+    return (
+        width.to_bytes(4, "little")
+        + height.to_bytes(4, "little")
+        + pixel_format.to_bytes(4, "little")
+        + pixels
+    )
 
 
 @dataclass(slots=True)
@@ -98,6 +109,34 @@ class FakeAdbServerConnection:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class FakePlatformAdbProcess:
+    def __init__(
+        self,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        returncode: int | None = 0,
+        communicate_error: Exception | None = None,
+    ) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self._communicate_error = communicate_error
+        self.returncode = returncode
+        self.killed = False
+        self.waited = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        if self._communicate_error is not None:
+            raise self._communicate_error
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> None:
+        self.waited = True
 
 
 class FakeAdbDevice:
@@ -189,6 +228,14 @@ class FakeAdbClient:
         if serial is None:
             raise ValueError("serial must be provided in tests")
         return self._devices[serial]
+
+
+@pytest.fixture(autouse=True)
+def _disable_platform_adb(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def missing_adb(*args: object, **kwargs: object) -> FakePlatformAdbProcess:
+        raise FileNotFoundError("adb")
+
+    monkeypatch.setattr(adb_device_module, "_create_subprocess_exec", missing_adb)
 
 
 def test_backend_lists_usable_devices_from_adb_server() -> None:
@@ -669,7 +716,198 @@ def test_direct_text_input_quotes_shell_arguments_and_rejects_ambiguous_text() -
     assert device.shell_calls == [(r"input text '50%%sdone%s\\%spath'", "utf-8")]
 
 
-def test_screenshot_prefers_exec_out_and_decodes_rgba_pixels() -> None:
+def test_screenshot_prefers_platform_adb_exec_out_png_and_decodes_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    png_bytes = make_png_bytes((1, 1), (12, 34, 56, 78))
+    subprocess_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_create_subprocess_exec(
+        *args: object,
+        **kwargs: object,
+    ) -> FakePlatformAdbProcess:
+        subprocess_calls.append((args, kwargs))
+        return FakePlatformAdbProcess(stdout=png_bytes)
+
+    monkeypatch.setattr(adb_device_module, "_create_subprocess_exec", fake_create_subprocess_exec)
+    device = FakeAdbDevice(
+        "R58M123ABC",
+        shell_outputs={
+            "screencap -p": RuntimeError("adbutils fallback should not be used"),
+        },
+        transport_outputs={
+            "exec:screencap": RuntimeError("adbutils raw fallback should not be used"),
+            "exec:screencap -p": RuntimeError("adbutils PNG fallback should not be used"),
+        },
+    )
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="R58M123ABC", state="device")],
+            devices={"R58M123ABC": device},
+        )
+    )
+
+    session = asyncio.run(backend.open_session("R58M123ABC"))
+    device.shell_calls.clear()
+    image = asyncio.run(session.screenshot())
+
+    assert image.size.width == 1
+    assert image.size.height == 1
+    assert image.pixel_format is PixelFormat.RGBA32
+    assert image.data == bytes((12, 34, 56, 78))
+    assert image.frame_id is not None
+    assert image.frame_id.startswith("adb-frame:adb-cli-png:")
+    assert subprocess_calls == [
+        (
+            ("adb", "-s", "R58M123ABC", "exec-out", "screencap", "-p"),
+            {
+                "stdout": adb_device_module.asyncio.subprocess.PIPE,
+                "stderr": adb_device_module.asyncio.subprocess.PIPE,
+            },
+        )
+    ]
+    assert device.transport_calls == []
+    assert device.shell_calls == []
+
+
+@pytest.mark.parametrize(
+    ("process", "expected_killed"),
+    (
+        (FakePlatformAdbProcess(returncode=1, stderr=b"failed"), False),
+        (FakePlatformAdbProcess(stdout=b""), False),
+        (FakePlatformAdbProcess(stdout=b"not-a-png"), False),
+        (FakePlatformAdbProcess(communicate_error=TimeoutError()), True),
+    ),
+)
+def test_screenshot_falls_back_to_raw_when_platform_adb_is_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+    process: FakePlatformAdbProcess,
+    expected_killed: bool,
+) -> None:
+    raw_bytes = make_raw_screencap_bytes(
+        (1, 1),
+        1,
+        bytes((1, 2, 3, 4)),
+    )
+    subprocess_calls: list[tuple[object, ...]] = []
+
+    async def fake_create_subprocess_exec(
+        *args: object,
+        **kwargs: object,
+    ) -> FakePlatformAdbProcess:
+        _ = kwargs
+        subprocess_calls.append(args)
+        return process
+
+    monkeypatch.setattr(adb_device_module, "_create_subprocess_exec", fake_create_subprocess_exec)
+    device = FakeAdbDevice(
+        "emulator-5554",
+        shell_outputs={
+            "screencap -p": RuntimeError("PNG fallback should not be used"),
+        },
+        transport_outputs={
+            "exec:screencap": raw_bytes,
+            "exec:screencap -p": RuntimeError("PNG fallback should not be used"),
+        },
+    )
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+    image = asyncio.run(session.screenshot())
+
+    assert image.size.width == 1
+    assert image.size.height == 1
+    assert image.pixel_format is PixelFormat.RGBA32
+    assert image.data == bytes((1, 2, 3, 4))
+    assert image.frame_id is not None
+    assert image.frame_id.startswith("adb-frame:adbutils-raw:")
+    assert subprocess_calls == [("adb", "-s", "emulator-5554", "exec-out", "screencap", "-p")]
+    assert process.killed is expected_killed
+    assert process.waited is expected_killed
+    assert device.transport_calls == [None]
+    assert device.transport_connections[0].sent_commands == ["exec:screencap"]
+    assert device.shell_calls == []
+
+
+def test_screenshot_falls_back_to_raw_exec_screencap_and_decodes_rgba_pixels() -> None:
+    raw_bytes = make_raw_screencap_bytes(
+        (2, 1),
+        1,
+        bytes((12, 34, 56, 78, 90, 80, 70, 60)),
+    )
+    device = FakeAdbDevice(
+        "emulator-5554",
+        shell_outputs={
+            "screencap -p": RuntimeError("PNG fallback should not be used"),
+        },
+        transport_outputs={
+            "exec:screencap": raw_bytes,
+            "exec:screencap -p": RuntimeError("PNG fallback should not be used"),
+        },
+    )
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+    image = asyncio.run(session.screenshot())
+
+    assert image.size.width == 2
+    assert image.size.height == 1
+    assert image.pixel_format is PixelFormat.RGBA32
+    assert image.data == bytes((12, 34, 56, 78, 90, 80, 70, 60))
+    assert image.frame_id is not None
+    assert image.frame_id.startswith("adb-frame:adbutils-raw:")
+    assert device.transport_calls == [None]
+    assert device.transport_connections[0].sent_commands == ["exec:screencap"]
+    assert device.shell_calls == []
+
+
+def test_screenshot_decodes_raw_rgbx_screencap_with_opaque_alpha() -> None:
+    raw_bytes = make_raw_screencap_bytes(
+        (2, 1),
+        2,
+        bytes((10, 20, 30, 0, 40, 50, 60, 99)),
+    )
+    device = FakeAdbDevice(
+        "emulator-5554",
+        shell_outputs={
+            "screencap -p": RuntimeError("PNG fallback should not be used"),
+        },
+        transport_outputs={
+            "exec:screencap": raw_bytes,
+            "exec:screencap -p": RuntimeError("PNG fallback should not be used"),
+        },
+    )
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    image = asyncio.run(session.screenshot())
+
+    assert image.size.width == 2
+    assert image.size.height == 1
+    assert image.pixel_format is PixelFormat.RGBA32
+    assert image.data == bytes((10, 20, 30, 255, 40, 50, 60, 255))
+    assert device.transport_calls == [None]
+    assert device.transport_connections[0].sent_commands == ["exec:screencap"]
+
+
+def test_screenshot_falls_back_to_exec_png_when_raw_screencap_is_invalid() -> None:
     png_bytes = make_png_bytes((2, 1), (12, 34, 56, 78))
     device = FakeAdbDevice(
         "emulator-5554",
@@ -677,6 +915,7 @@ def test_screenshot_prefers_exec_out_and_decodes_rgba_pixels() -> None:
             "screencap -p": RuntimeError("fallback should not be used"),
         },
         transport_outputs={
+            "exec:screencap": make_raw_screencap_bytes((2, 1), 99, b"\x00" * 8),
             "exec:screencap -p": png_bytes,
         },
     )
@@ -696,13 +935,15 @@ def test_screenshot_prefers_exec_out_and_decodes_rgba_pixels() -> None:
     assert image.pixel_format is PixelFormat.RGBA32
     assert image.data == bytes((12, 34, 56, 78, 12, 34, 56, 78))
     assert image.frame_id is not None
+    assert image.frame_id.startswith("adb-frame:adbutils-png:")
     assert not hasattr(session, "capture" + "_frame")
-    assert device.transport_calls == [None]
-    assert device.transport_connections[0].sent_commands == ["exec:screencap -p"]
+    assert device.transport_calls == [None, None]
+    assert device.transport_connections[0].sent_commands == ["exec:screencap"]
+    assert device.transport_connections[1].sent_commands == ["exec:screencap -p"]
     assert device.shell_calls == []
 
 
-def test_screenshot_falls_back_to_raw_shell_screencap_when_exec_fails() -> None:
+def test_screenshot_falls_back_to_shell_png_screencap_when_exec_fails() -> None:
     png_bytes = make_png_bytes((1, 1), (7, 8, 9, 255))
     device = FakeAdbDevice(
         "emulator-5555",
@@ -710,6 +951,7 @@ def test_screenshot_falls_back_to_raw_shell_screencap_when_exec_fails() -> None:
             "screencap -p": png_bytes,
         },
         transport_outputs={
+            "exec:screencap": RuntimeError("raw exec unavailable"),
             "exec:screencap -p": RuntimeError("exec unavailable"),
         },
     )
@@ -726,11 +968,11 @@ def test_screenshot_falls_back_to_raw_shell_screencap_when_exec_fails() -> None:
     assert image.size.width == 1
     assert image.size.height == 1
     assert image.data == bytes((7, 8, 9, 255))
-    assert device.transport_calls == [None]
+    assert device.transport_calls == [None, None]
     assert device.shell_calls[-1] == ("screencap -p", None)
 
 
-def test_screenshot_falls_back_to_shell_screencap_when_exec_out_fails() -> None:
+def test_screenshot_normalizes_shell_png_screencap_when_exec_fails() -> None:
     png_bytes = make_png_bytes((1, 2), (90, 80, 70, 255)).replace(b"\n", b"\r\n")
     device = FakeAdbDevice(
         "emulator-5556",
@@ -738,6 +980,7 @@ def test_screenshot_falls_back_to_shell_screencap_when_exec_out_fails() -> None:
             "screencap -p": png_bytes,
         },
         transport_outputs={
+            "exec:screencap": RuntimeError("raw exec unavailable"),
             "exec:screencap -p": RuntimeError("exec-out unavailable"),
         },
     )
@@ -755,7 +998,7 @@ def test_screenshot_falls_back_to_shell_screencap_when_exec_out_fails() -> None:
     assert image.size.height == 2
     assert image.pixel_format is PixelFormat.RGBA32
     assert image.data == bytes((90, 80, 70, 255, 90, 80, 70, 255))
-    assert device.transport_calls == [None]
+    assert device.transport_calls == [None, None]
     assert device.shell_calls[-1] == ("screencap -p", None)
 
 
@@ -766,6 +1009,7 @@ def test_screenshot_raises_when_adb_output_is_not_a_valid_png() -> None:
             "screencap -p": b"still-not-a-png",
         },
         transport_outputs={
+            "exec:screencap": b"not-a-raw-screencap",
             "exec:screencap -p": b"not-a-png",
         },
     )

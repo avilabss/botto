@@ -7,7 +7,7 @@ from os import PathLike
 from pathlib import Path
 
 from android_game_automator.image import FrameImage
-from android_game_automator.types import Match, Rect, ScreenRect
+from android_game_automator.types import Match, NormalizedPoint, Rect, ScreenRect
 from botto.screen_detector import analyze_screen
 from botto.screens import BaseScreen, Overlay, ScreenAnalysis
 from PIL import Image
@@ -75,36 +75,36 @@ def test_analyze_screen_detects_home_village_from_anchor_templates() -> None:
     assert len(reader.calls) == 1
 
 
-def test_analyze_screen_detects_connection_lost_overlay_before_visible_home() -> None:
-    analysis = analyze_screen(
-        _frame(),
-        read_text_fn=FakeTextReader("Connection lost\nTry again", ""),
-        find_template_fn=FakeTemplateMatcher(
-            {
-                "attack_button.png": 0.91,
-                "shop_button.png": 0.89,
-            }
-        ),
+def test_analyze_screen_detects_connection_lost_without_try_again_and_short_circuits() -> None:
+    reader = FakeTextReader("Connection lost\nPlease check your internet connection.")
+    matcher = FakeTemplateMatcher(
+        {
+            "attack_button.png": 0.91,
+            "shop_button.png": 0.89,
+        }
     )
 
-    assert analysis.base_screen == BaseScreen.HOME_VILLAGE
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=reader,
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.UNKNOWN
     assert analysis.overlay == Overlay.CONNECTION_LOST
     assert analysis.recommended_action is not None
     assert analysis.recommended_action.label == "tap_try_again"
-    assert analysis.recommended_action.tap_target is not None
-    assert _evidence_labels(analysis) == {
-        "attack_button",
-        "modal.connection_lost",
-        "shop_button",
-    }
+    assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
+    assert _evidence_labels(analysis) == {"modal.connection_lost"}
+    assert matcher.calls == []
+    assert len(reader.calls) == 1
 
 
-def test_analyze_screen_detects_another_device_connected_overlay() -> None:
+def test_analyze_screen_detects_another_device_before_generic_connection_lost() -> None:
     analysis = analyze_screen(
         _frame(),
         read_text_fn=FakeTextReader(
-            "Connection lost\nAnother device is connecting\nReload",
-            "",
+            "Connection lost\nAnother device is connecting to this village.",
         ),
         find_template_fn=FakeTemplateMatcher({}),
     )
@@ -113,14 +113,16 @@ def test_analyze_screen_detects_another_device_connected_overlay() -> None:
     assert analysis.overlay == Overlay.ANOTHER_DEVICE_CONNECTED
     assert analysis.recommended_action is not None
     assert analysis.recommended_action.label == "tap_reload"
-    assert analysis.recommended_action.tap_target is not None
+    assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
     assert _evidence_labels(analysis) == {"modal.another_device_connected"}
 
 
 def test_analyze_screen_detects_anyone_there_overlay() -> None:
     analysis = analyze_screen(
         _frame(),
-        read_text_fn=FakeTextReader("Anyone there?\nReload game", ""),
+        read_text_fn=FakeTextReader(
+            "Anyone there?\nYou have been disconnected due to inactivity.",
+        ),
         find_template_fn=FakeTemplateMatcher({}),
     )
 
@@ -128,7 +130,8 @@ def test_analyze_screen_detects_anyone_there_overlay() -> None:
     assert analysis.overlay == Overlay.ANYONE_THERE
     assert analysis.recommended_action is not None
     assert analysis.recommended_action.label == "tap_reload_game"
-    assert analysis.recommended_action.tap_target is not None
+    assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
+    assert analysis.recommended_action.tap_target.y != 0.78
     assert _evidence_labels(analysis) == {"modal.anyone_there"}
 
 

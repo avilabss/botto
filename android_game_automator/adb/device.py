@@ -6,6 +6,7 @@ import asyncio
 import re
 import shlex
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -27,7 +28,7 @@ from android_game_automator.types import (
     Viewport,
 )
 
-from ._capture import decode_screencap_png, normalize_shell_screencap_output
+from ._capture import decode_screencap_png, decode_screencap_raw, normalize_shell_screencap_output
 from ._parse import (
     orient_size_for_rotation,
     parse_display_size,
@@ -55,6 +56,8 @@ _DEFAULT_PINCH_INNER_SPAN = 0.20
 _DEFAULT_PINCH_OUTER_SPAN = 0.60
 _DEFAULT_PINCH_DURATION_MS = 300
 _DEFAULT_PINCH_CENTER = NormalizedPoint(x=0.5, y=0.5)
+_PLATFORM_ADB_SCREENSHOT_TIMEOUT_SECONDS = 5.0
+_create_subprocess_exec = asyncio.create_subprocess_exec
 
 
 class AndroidKey(StrEnum):
@@ -255,6 +258,29 @@ class AdbDeviceSession:
         self._ensure_open()
 
         errors: list[Exception] = []
+        try:
+            platform_png_output = await self._run_platform_adb_exec_out_screencap_png()
+        except Exception as exc:
+            errors.append(exc)
+        else:
+            try:
+                return decode_screencap_png(
+                    platform_png_output,
+                    capture_strategy="adb-cli-png",
+                )
+            except AdbFrameCaptureError as exc:
+                errors.append(exc)
+
+        try:
+            raw_output = await self._run_exec_bytes("screencap")
+        except Exception as exc:
+            errors.append(exc)
+        else:
+            try:
+                return decode_screencap_raw(raw_output, capture_strategy="adbutils-raw")
+            except AdbFrameCaptureError as exc:
+                errors.append(exc)
+
         for capture, normalize in (
             (self._run_exec_bytes, False),
             (self._run_shell_bytes, True),
@@ -273,7 +299,7 @@ class AdbDeviceSession:
 
             for candidate in candidates:
                 try:
-                    return decode_screencap_png(candidate)
+                    return decode_screencap_png(candidate, capture_strategy="adbutils-png")
                 except AdbFrameCaptureError as exc:
                     errors.append(exc)
 
@@ -450,6 +476,38 @@ class AdbDeviceSession:
         if isinstance(output, bytes):
             return output.decode("utf-8", errors="replace")
         return output
+
+    async def _run_platform_adb_exec_out_screencap_png(self) -> bytes:
+        serial = self._info.device.identity.device_id
+        process = await _create_subprocess_exec(
+            "adb",
+            "-s",
+            serial,
+            "exec-out",
+            "screencap",
+            "-p",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=_PLATFORM_ADB_SCREENSHOT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            with suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            raise AdbFrameCaptureError("Platform adb exec-out screencap timed out.") from exc
+
+        stdout_bytes = stdout or b""
+        stderr_bytes = stderr or b""
+        if process.returncode != 0:
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+            detail = f": {stderr_text}" if stderr_text else ""
+            raise AdbFrameCaptureError(f"Platform adb exec-out screencap failed{detail}.")
+
+        return stdout_bytes
 
     async def _run_exec_bytes(self, command: str) -> bytes:
         transport = await self._device.open_transport()

@@ -51,7 +51,7 @@ def test_serialize_screen_analysis_handles_enums_dataclasses_and_normalized_poin
         ),
         recommended_action=RecommendedAction(
             label="tap_try_again",
-            tap_target=NormalizedPoint(x=0.5, y=0.78),
+            tap_target=NormalizedPoint(x=0.5, y=0.88),
             details={"overlay": Overlay.CONNECTION_LOST},
         ),
     )
@@ -77,7 +77,7 @@ def test_serialize_screen_analysis_handles_enums_dataclasses_and_normalized_poin
         ],
         "recommended_action": {
             "label": "tap_try_again",
-            "tap_target": {"x": 0.5, "y": 0.78},
+            "tap_target": {"x": 0.5, "y": 0.88},
             "details": {"overlay": "connection_lost"},
         },
     }
@@ -153,7 +153,7 @@ def test_analyze_once_can_skip_launch_and_never_executes_input_actions(
     assert session.closed is True
     assert result["analysis"]["recommended_action"] == {
         "label": "tap_reload",
-        "tap_target": {"x": 0.5, "y": 0.78},
+        "tap_target": {"x": 0.5, "y": 0.88},
         "details": {"overlay": "connection_lost"},
     }
     _assert_timings(result["timings"])
@@ -191,7 +191,7 @@ def _analysis_with_recommended_action() -> ScreenAnalysis:
         confidence=0.9,
         recommended_action=RecommendedAction(
             label="tap_reload",
-            tap_target=NormalizedPoint(x=0.5, y=0.78),
+            tap_target=NormalizedPoint(x=0.5, y=0.88),
             details={"overlay": Overlay.CONNECTION_LOST},
         ),
     )

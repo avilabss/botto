@@ -13,9 +13,19 @@ from typing import Any, Protocol, TextIO
 
 from android_game_automator.artifacts import ArtifactStore
 from android_game_automator.image import FrameImage
+from android_game_automator.scrcpy import DEFAULT_SCRCPY_MAX_FPS
 from android_game_automator.types import DeviceInfo, SessionInfo
 
 from android_game_automator.adb import AdbDeviceBackend
+from botto.live import (
+    DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS,
+    DEFAULT_LIVE_DEBUG_WINDOW_TITLE,
+    DEFAULT_LIVE_PREVIEW_WINDOW_TITLE,
+    LiveFrameSourceFactory,
+    PreviewWindow,
+    run_live_debug,
+    run_live_preview,
+)
 from botto.runner import (
     DEFAULT_ARTIFACT_ROOT,
     DEFAULT_CLASH_PACKAGE,
@@ -159,6 +169,76 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_LAUNCH_WAIT_SECONDS,
         help="Seconds to wait after launch before capturing a screenshot.",
     )
+
+    live_preview_parser = subparsers.add_parser(
+        "live-preview",
+        help="Show a read-only live scrcpy preview window.",
+    )
+    live_preview_parser.add_argument(
+        "--serial",
+        "--device",
+        dest="device",
+        help="ADB device serial. If omitted, the only connected device is used.",
+    )
+    live_preview_parser.add_argument(
+        "--package",
+        default=DEFAULT_CLASH_PACKAGE,
+        help="Android package to launch before showing the preview.",
+    )
+    live_preview_parser.add_argument(
+        "--skip-launch",
+        action="store_true",
+        help="Preview the current screen without launching the app first.",
+    )
+    live_preview_parser.add_argument(
+        "--max-fps",
+        type=int,
+        default=DEFAULT_SCRCPY_MAX_FPS,
+        help="Maximum scrcpy video frame rate; 0 leaves scrcpy unlimited.",
+    )
+    live_preview_parser.add_argument(
+        "--window-title",
+        default=DEFAULT_LIVE_PREVIEW_WINDOW_TITLE,
+        help="OpenCV window title for the live preview.",
+    )
+
+    live_debug_parser = subparsers.add_parser(
+        "live-debug",
+        help="Show read-only live scrcpy video with throttled detector annotations.",
+    )
+    live_debug_parser.add_argument(
+        "--serial",
+        "--device",
+        dest="device",
+        help="ADB device serial. If omitted, the only connected device is used.",
+    )
+    live_debug_parser.add_argument(
+        "--package",
+        default=DEFAULT_CLASH_PACKAGE,
+        help="Android package to launch before showing the debug preview.",
+    )
+    live_debug_parser.add_argument(
+        "--skip-launch",
+        action="store_true",
+        help="Debug the current screen without launching the app first.",
+    )
+    live_debug_parser.add_argument(
+        "--max-fps",
+        type=int,
+        default=DEFAULT_SCRCPY_MAX_FPS,
+        help="Maximum scrcpy video frame rate; 0 leaves scrcpy unlimited.",
+    )
+    live_debug_parser.add_argument(
+        "--window-title",
+        default=DEFAULT_LIVE_DEBUG_WINDOW_TITLE,
+        help="OpenCV window title for the live debug preview.",
+    )
+    live_debug_parser.add_argument(
+        "--analyze-every-seconds",
+        type=float,
+        default=DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS,
+        help="Minimum seconds between detector runs on live frames.",
+    )
     return parser
 
 
@@ -167,6 +247,8 @@ def run(
     *,
     backend_factory: _BackendFactory = AdbDeviceBackend,
     screen_analyzer: ScreenAnalyzer | None = None,
+    live_source_factory: LiveFrameSourceFactory | None = None,
+    preview_window: PreviewWindow | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
@@ -187,6 +269,8 @@ def run(
                 args,
                 backend_factory=backend_factory,
                 screen_analyzer=screen_analyzer,
+                live_source_factory=live_source_factory,
+                preview_window=preview_window,
                 stdout=resolved_stdout,
             )
         )
@@ -203,6 +287,8 @@ async def _run_command(
     *,
     backend_factory: _BackendFactory,
     screen_analyzer: ScreenAnalyzer | None,
+    live_source_factory: LiveFrameSourceFactory | None,
+    preview_window: PreviewWindow | None,
     stdout: TextIO,
 ) -> int:
     backend = backend_factory()
@@ -281,6 +367,40 @@ async def _run_command(
         except ValueError as exc:
             raise CliError(str(exc)) from exc
         _write_payload(payload, as_json=True, stdout=stdout)
+        return 0
+
+    if args.command == "live-preview":
+        try:
+            await run_live_preview(
+                device_id=args.device,
+                package_name=args.package,
+                launch=not args.skip_launch,
+                max_fps=args.max_fps,
+                window_title=args.window_title,
+                backend=backend,
+                source_factory=live_source_factory,
+                preview_window=preview_window,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        return 0
+
+    if args.command == "live-debug":
+        try:
+            await run_live_debug(
+                device_id=args.device,
+                package_name=args.package,
+                launch=not args.skip_launch,
+                max_fps=args.max_fps,
+                window_title=args.window_title,
+                analyze_every_seconds=args.analyze_every_seconds,
+                backend=backend,
+                source_factory=live_source_factory,
+                preview_window=preview_window,
+                screen_analyzer=screen_analyzer if screen_analyzer is not None else analyze_screen,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
         return 0
 
     raise CliError(f"Unsupported command {args.command!r}")

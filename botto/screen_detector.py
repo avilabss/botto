@@ -40,13 +40,13 @@ _SUPERCELL_LOGO_TEMPLATE = _TEMPLATE_DIR / "supercell_logo.png"
 _ATTACK_BUTTON_TEMPLATE = _TEMPLATE_DIR / "attack_button.png"
 _SHOP_BUTTON_TEMPLATE = _TEMPLATE_DIR / "shop_button.png"
 
-_MODAL_TEXT_REGION = NormalizedRect(left=0.18, top=0.45, width=0.64, height=0.42)
+_MODAL_TEXT_REGION = NormalizedRect(left=0.22, top=0.58, width=0.56, height=0.39)
 _LOADING_TEXT_REGION = NormalizedRect(left=0.28, top=0.70, width=0.44, height=0.20)
 _SUPERCELL_LOGO_REGION = NormalizedRect(left=0.20, top=0.20, width=0.60, height=0.60)
 _ATTACK_BUTTON_REGION = NormalizedRect(left=0.00, top=0.74, width=0.25, height=0.26)
 _SHOP_BUTTON_REGION = NormalizedRect(left=0.80, top=0.72, width=0.20, height=0.28)
 
-_OVERLAY_BUTTON_TAP_TARGET = NormalizedPoint(x=0.50, y=0.78)
+_BLOCKING_POPUP_BUTTON_TAP_TARGET = NormalizedPoint(x=0.50, y=0.88)
 _OCR_CONFIDENCE = 0.9
 _LOADING_CONFIDENCE = 0.8
 _SUPERCELL_TEMPLATE_CONFIDENCE = 0.88
@@ -65,6 +65,15 @@ def analyze_screen(
         image,
         read_text_fn=read_text_fn,
     )
+    if overlay is not Overlay.NONE:
+        return ScreenAnalysis(
+            base_screen=BaseScreen.UNKNOWN,
+            overlay=overlay,
+            confidence=overlay_confidence,
+            evidence=overlay_evidence,
+            recommended_action=recommended_action,
+        )
+
     base_screen, base_confidence, base_evidence = _detect_base_screen(
         image,
         read_text_fn=read_text_fn,
@@ -89,34 +98,34 @@ def _detect_overlay(
     if not modal_text:
         return Overlay.NONE, 0.0, (), None
 
-    if _contains_all_phrases(
-        modal_text,
-        ("Connection lost", "Another device is connecting", "Reload"),
-    ):
+    another_device_phrases = _another_device_popup_phrases(modal_text)
+    if another_device_phrases is not None:
         return _blocking_overlay_result(
             Overlay.ANOTHER_DEVICE_CONNECTED,
             evidence_label="modal.another_device_connected",
             action_label="tap_reload",
             text=modal_text,
-            phrases=("Connection lost", "Another device is connecting", "Reload"),
+            phrases=another_device_phrases,
         )
 
-    if _contains_all_phrases(modal_text, ("Anyone there", "Reload game")):
+    anyone_there_phrases = _anyone_there_popup_phrases(modal_text)
+    if anyone_there_phrases is not None:
         return _blocking_overlay_result(
             Overlay.ANYONE_THERE,
             evidence_label="modal.anyone_there",
             action_label="tap_reload_game",
             text=modal_text,
-            phrases=("Anyone there", "Reload game"),
+            phrases=anyone_there_phrases,
         )
 
-    if _contains_all_phrases(modal_text, ("Connection lost", "Try again")):
+    connection_lost_phrases = _connection_lost_popup_phrases(modal_text)
+    if connection_lost_phrases is not None:
         return _blocking_overlay_result(
             Overlay.CONNECTION_LOST,
             evidence_label="modal.connection_lost",
             action_label="tap_try_again",
             text=modal_text,
-            phrases=("Connection lost", "Try again"),
+            phrases=connection_lost_phrases,
         )
 
     return Overlay.NONE, 0.0, (), None
@@ -201,7 +210,7 @@ def _blocking_overlay_result(
     )
     action = RecommendedAction(
         label=action_label,
-        tap_target=_OVERLAY_BUTTON_TAP_TARGET,
+        tap_target=_BLOCKING_POPUP_BUTTON_TAP_TARGET,
         details={"overlay": overlay.value},
     )
     return overlay, _OCR_CONFIDENCE, (evidence,), action
@@ -237,8 +246,50 @@ def _template_evidence(
     )
 
 
-def _contains_all_phrases(text: str, phrases: Iterable[str]) -> bool:
-    return all(_contains_phrase(text, phrase) for phrase in phrases)
+def _anyone_there_popup_phrases(text: str) -> tuple[str, ...] | None:
+    return _matching_phrases(
+        text,
+        (
+            "Anyone there",
+            "disconnected due to inactivity",
+        ),
+    )
+
+
+def _another_device_popup_phrases(text: str) -> tuple[str, ...] | None:
+    if not _contains_phrase(text, "Another device"):
+        return None
+
+    connection_phrase = _first_matching_phrase(text, ("connecting", "connect"))
+    if connection_phrase is None:
+        return None
+
+    return ("Another device", connection_phrase)
+
+
+def _connection_lost_popup_phrases(text: str) -> tuple[str, ...] | None:
+    return _matching_phrases(
+        text,
+        (
+            "Connection lost",
+            "lost connection with the server",
+            "internet connection",
+        ),
+    )
+
+
+def _matching_phrases(text: str, phrases: Iterable[str]) -> tuple[str, ...] | None:
+    matches = tuple(phrase for phrase in phrases if _contains_phrase(text, phrase))
+    if not matches:
+        return None
+    return matches
+
+
+def _first_matching_phrase(text: str, phrases: Iterable[str]) -> str | None:
+    for phrase in phrases:
+        if _contains_phrase(text, phrase):
+            return phrase
+    return None
 
 
 def _contains_phrase(text: str, phrase: str) -> bool:
