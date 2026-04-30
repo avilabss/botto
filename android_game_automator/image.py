@@ -267,6 +267,17 @@ def probe_color(
     )
 
 
+def get_color(
+    image: FrameImage,
+    point: ScreenPoint,
+    *,
+    viewport: Viewport | None = None,
+) -> Color:
+    """Read the color at a point using FrameImage coordinate handling."""
+
+    return image.pixel(point, viewport=viewport)
+
+
 def rect_to_normalized(rect: Rect, size: Size) -> NormalizedRect:
     if rect.right > size.width or rect.bottom > size.height:
         raise ValueError("rect must fit within image size")
@@ -304,6 +315,7 @@ def _require_viewport_region(viewport: Viewport) -> Rect:
 __all__ = [
     "Color",
     "FrameImage",
+    "get_color",
     "intersect_regions",
     "pixel_color_matches",
     "probe_color",

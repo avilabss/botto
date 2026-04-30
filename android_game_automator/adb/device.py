@@ -6,6 +6,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from types import TracebackType
 from typing import Self
 from uuid import uuid4
@@ -49,6 +50,25 @@ _ANDROID_PACKAGE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0
 _ANDROID_KEY_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
 
 
+class AndroidKey(StrEnum):
+    """Practical Android keyevent names for common automation inputs."""
+
+    HOME = "KEYCODE_HOME"
+    BACK = "KEYCODE_BACK"
+    MENU = "KEYCODE_MENU"
+    APP_SWITCH = "KEYCODE_APP_SWITCH"
+    ENTER = "KEYCODE_ENTER"
+    ESCAPE = "KEYCODE_ESCAPE"
+    POWER = "KEYCODE_POWER"
+    VOLUME_UP = "KEYCODE_VOLUME_UP"
+    VOLUME_DOWN = "KEYCODE_VOLUME_DOWN"
+    DPAD_CENTER = "KEYCODE_DPAD_CENTER"
+    DPAD_UP = "KEYCODE_DPAD_UP"
+    DPAD_DOWN = "KEYCODE_DPAD_DOWN"
+    DPAD_LEFT = "KEYCODE_DPAD_LEFT"
+    DPAD_RIGHT = "KEYCODE_DPAD_RIGHT"
+
+
 class AdbDeviceBackend:
     """Device discovery and session lifecycle backed by adbutils-async."""
 
@@ -75,17 +95,25 @@ class AdbDeviceBackend:
                 "adb.state": state,
                 "adb.target_kind": _target_kind(listed.serial),
             }
+            metadata.update(await self._listed_device_metadata(listed.serial))
             devices.append(
                 DeviceInfo(
                     identity=DeviceIdentity(
                         backend_name=self.backend_name,
                         device_id=listed.serial,
-                        display_name=listed.serial,
+                        display_name=_display_name_from_metadata(metadata) or listed.serial,
                     ),
                     metadata=metadata,
                 )
             )
         return tuple(devices)
+
+    async def _listed_device_metadata(self, device_id: str) -> dict[str, str]:
+        try:
+            device = await self._client.device(serial=device_id)
+        except Exception:
+            return {}
+        return await _device_metadata(device)
 
     async def open_session(self, device_id: str | None = None) -> AdbDeviceSession:
         if device_id is None:
@@ -119,7 +147,8 @@ class AdbDeviceBackend:
             "adb.state": state,
             "adb.target_kind": _target_kind(device_id),
         }
-        display_name = await _device_display_name(device)
+        device_metadata = await _device_metadata(device)
+        display_name = _display_name_from_metadata(device_metadata)
 
         device_info = DeviceInfo(
             identity=DeviceIdentity(
@@ -129,7 +158,7 @@ class AdbDeviceBackend:
             ),
             metadata={
                 **metadata,
-                **(await _device_metadata(device)),
+                **device_metadata,
             },
         )
         session_info = SessionInfo(
@@ -268,8 +297,8 @@ class AdbDeviceSession:
         end = _resolve_normalized_display_point(end_x, end_y, viewport)
         await self._run_shell(_build_swipe_shell_command(start, end, duration_ms=duration_ms))
 
-    async def key(self, key: str) -> None:
-        """Press an Android key by name or key code."""
+    async def key(self, key: AndroidKey | str) -> None:
+        """Press an Android key by enum, raw safe name, or numeric key code."""
         self._ensure_open()
         await self._run_shell(_build_key_shell_command(key))
 
@@ -369,16 +398,6 @@ async def _safe_device_state(device: AdbDeviceHandle) -> str:
         ) from exc
 
 
-async def _device_display_name(device: AdbDeviceHandle) -> str | None:
-    manufacturer = await _safe_getprop(device, _PROP_MANUFACTURER)
-    model = await _safe_getprop(device, _PROP_MODEL)
-
-    parts = [part for part in (manufacturer, model) if part]
-    if not parts:
-        return None
-    return " ".join(parts)
-
-
 async def _device_metadata(device: AdbDeviceHandle) -> dict[str, str]:
     metadata: dict[str, str] = {}
 
@@ -399,6 +418,20 @@ async def _device_metadata(device: AdbDeviceHandle) -> dict[str, str]:
         metadata["adb.android_sdk"] = sdk
 
     return metadata
+
+
+def _display_name_from_metadata(metadata: dict[str, str]) -> str | None:
+    parts = [
+        part
+        for part in (
+            metadata.get("adb.manufacturer"),
+            metadata.get("adb.model"),
+        )
+        if part
+    ]
+    if not parts:
+        return None
+    return " ".join(parts)
 
 
 async def _safe_getprop(device: AdbDeviceHandle, name: str) -> str | None:
@@ -443,7 +476,7 @@ def _build_swipe_shell_command(start: Point, end: Point, *, duration_ms: int) ->
     return f"input swipe {start.x} {start.y} {end.x} {end.y} {duration_ms}"
 
 
-def _build_key_shell_command(key: str) -> str:
+def _build_key_shell_command(key: AndroidKey | str) -> str:
     return f"input keyevent {_validated_key_shell_arg(key)}"
 
 
@@ -451,11 +484,18 @@ def _build_text_shell_command(text: str) -> str:
     return f"input text {_validated_text_shell_arg(text)}"
 
 
-def _validated_key_shell_arg(key: str) -> str:
-    normalized = key.strip().upper()
+def _validated_key_shell_arg(key: AndroidKey | str) -> str:
+    if isinstance(key, AndroidKey):
+        raw_key = key.value
+    elif isinstance(key, str):
+        raw_key = key
+    else:
+        raise TypeError("key must be an AndroidKey or string")
+
+    normalized = raw_key.strip().upper()
     if not normalized:
         raise ValueError("key must be non-empty")
-    if normalized != key.upper():
+    if normalized != raw_key.upper():
         raise ValueError("key must not contain surrounding whitespace")
     if normalized.isdigit():
         return normalized

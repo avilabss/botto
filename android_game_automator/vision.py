@@ -1,11 +1,12 @@
-"""OpenCV-backed template matching helpers."""
+"""OpenCV-backed template and feature matching helpers."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from dataclasses import dataclass
 from os import PathLike
-from typing import cast
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -13,10 +14,26 @@ import numpy.typing as npt
 from PIL import Image
 
 from android_game_automator.image import FrameImage, resolve_region
-from android_game_automator.types import Match, Point, Rect, ScreenRect, Viewport
+from android_game_automator.types import Match, Point, Rect, ScreenRect, Size, Viewport
 
 type GrayImage = npt.NDArray[np.uint8]
 type ImageInput = FrameImage | Image.Image | str | PathLike[str]
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureMatch:
+    """Single best ORB feature match in absolute source-image pixels."""
+
+    bounds: Rect
+    confidence: float
+    match_count: int
+    center: Point
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must be within [0.0, 1.0]")
+        if self.match_count <= 0:
+            raise ValueError("match_count must be > 0")
 
 
 def find_template(
@@ -46,6 +63,39 @@ def find_template(
         rotations=resolved_rotations,
     )
     if match is None or match.confidence < resolved_min_confidence:
+        return None
+    return match
+
+
+def find_feature_match(
+    source: ImageInput,
+    template: ImageInput,
+    *,
+    region: ScreenRect | None = None,
+    min_matches: int = 8,
+    min_confidence: float = 0.25,
+) -> FeatureMatch | None:
+    """Return the best ORB feature match for textured objects, or ``None``.
+
+    ORB matching is useful for feature-rich/textured objects. For flat UI icons or
+    buttons, prefer :func:`find_template`.
+    """
+
+    if min_matches < 4:
+        raise ValueError("min_matches must be >= 4")
+    _validate_confidence(min_confidence, name="min_confidence")
+
+    source_image = _coerce_image(source, name="source")
+    template_image = _coerce_image(template, name="template")
+    search_region = resolve_region(region, Viewport(surface_size=source_image.size))
+
+    match = _match_features(
+        source_image,
+        search_region,
+        template_image,
+        min_matches=min_matches,
+    )
+    if match is None or match.confidence < min_confidence:
         return None
     return match
 
@@ -147,6 +197,145 @@ def _match_template(
     )
 
 
+def _match_features(
+    source: FrameImage,
+    search_region: Rect,
+    template: FrameImage,
+    *,
+    min_matches: int,
+) -> FeatureMatch | None:
+    search_image = source.crop(search_region)
+    search_array = _frame_image_to_grayscale_array(search_image)
+    template_array = _frame_image_to_grayscale_array(template)
+
+    orb = cast(Any, cv2).ORB_create(nfeatures=1000, edgeThreshold=5)
+    template_keypoints, template_descriptors = orb.detectAndCompute(template_array, None)
+    search_keypoints, search_descriptors = orb.detectAndCompute(search_array, None)
+    if template_descriptors is None or search_descriptors is None:
+        return None
+    if len(template_keypoints) < min_matches or len(search_keypoints) < min_matches:
+        return None
+
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = sorted(
+        matcher.match(template_descriptors, search_descriptors),
+        key=lambda match: match.distance,
+    )
+    if len(matches) < min_matches:
+        return None
+
+    template_points = np.array(
+        [template_keypoints[match.queryIdx].pt for match in matches],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+    search_points = np.array(
+        [search_keypoints[match.trainIdx].pt for match in matches],
+        dtype=np.float32,
+    ).reshape(
+        -1,
+        1,
+        2,
+    )
+    homography, inlier_mask = cv2.findHomography(
+        template_points,
+        search_points,
+        cv2.RANSAC,
+        5.0,
+    )
+    if homography is None or inlier_mask is None:
+        return None
+
+    mask_values = [bool(value) for value in inlier_mask.ravel().tolist()]
+    inlier_distances = [
+        match.distance
+        for match, is_inlier in zip(matches, mask_values, strict=True)
+        if is_inlier
+    ]
+    inlier_count = len(inlier_distances)
+    if inlier_count < min_matches:
+        return None
+
+    bounds = _feature_match_bounds(
+        homography,
+        template_width=template_array.shape[1],
+        template_height=template_array.shape[0],
+        search_region=search_region,
+        source_size=source.size,
+    )
+    if bounds is None:
+        return None
+
+    confidence = _feature_confidence(
+        distances=inlier_distances,
+        inlier_count=inlier_count,
+        min_matches=min_matches,
+    )
+    return FeatureMatch(
+        bounds=bounds,
+        confidence=confidence,
+        match_count=inlier_count,
+        center=Point(
+            x=bounds.left + bounds.width // 2,
+            y=bounds.top + bounds.height // 2,
+        ),
+    )
+
+
+def _feature_match_bounds(
+    homography: npt.NDArray[Any],
+    *,
+    template_width: int,
+    template_height: int,
+    search_region: Rect,
+    source_size: Size,
+) -> Rect | None:
+    corners = np.array(
+        [
+            [0, 0],
+            [template_width, 0],
+            [template_width, template_height],
+            [0, template_height],
+        ],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+    projected = cv2.perspectiveTransform(corners, homography)
+    if not bool(np.isfinite(projected).all()):
+        return None
+    xs = projected[:, 0, 0]
+    ys = projected[:, 0, 1]
+
+    left = search_region.left + math.floor(float(xs.min()))
+    top = search_region.top + math.floor(float(ys.min()))
+    right = search_region.left + math.ceil(float(xs.max()))
+    bottom = search_region.top + math.ceil(float(ys.max()))
+
+    source_width = source_size.width
+    source_height = source_size.height
+    left = max(0, min(left, source_width))
+    top = max(0, min(top, source_height))
+    right = max(0, min(right, source_width))
+    bottom = max(0, min(bottom, source_height))
+
+    if right <= left or bottom <= top:
+        return None
+    return Rect(left=left, top=top, width=right - left, height=bottom - top)
+
+
+def _feature_confidence(
+    *,
+    distances: Iterable[float],
+    inlier_count: int,
+    min_matches: int,
+) -> float:
+    resolved_distances = tuple(distances)
+    if not resolved_distances:
+        return 0.0
+    average_distance = sum(resolved_distances) / len(resolved_distances)
+    distance_quality = 1.0 - min(96.0, average_distance) / 96.0
+    support_quality = min(1.0, inlier_count / min_matches)
+    return max(0.0, min(1.0, support_quality * distance_quality))
+
+
 def _frame_image_to_grayscale_array(image: FrameImage) -> GrayImage:
     source = image.to_pil_image()
     try:
@@ -226,4 +415,4 @@ def _best_template_match(
     return confidence, Point(x=min_location[0], y=min_location[1])
 
 
-__all__ = ["find_template"]
+__all__ = ["FeatureMatch", "find_feature_match", "find_template"]

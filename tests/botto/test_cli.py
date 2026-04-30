@@ -53,6 +53,8 @@ def test_capture_saves_png_for_selected_device(tmp_path: Path) -> None:
             str(tmp_path),
             "--label",
             "capture",
+            "--run-name",
+            "run-1",
         ],
         backend_factory=lambda: FakeBackend(
             devices=(make_device_info("emulator-5554"),),
@@ -64,11 +66,15 @@ def test_capture_saves_png_for_selected_device(tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert stderr.getvalue() == ""
-    saved_path = tmp_path / "capture.png"
+    saved_path = tmp_path / "run-1" / "images" / "capture.png"
     assert saved_path.is_file()
-    manifest_entry = json.loads((tmp_path / "manifest.jsonl").read_text(encoding="utf-8"))
+    manifest_entry = json.loads(
+        (tmp_path / "run-1" / "manifest.jsonl").read_text(encoding="utf-8")
+    )
     assert manifest_entry["kind"] == "image"
-    assert manifest_entry["path"] == "capture.png"
+    assert manifest_entry["path"] == "run-1/images/capture.png"
+    assert manifest_entry["run_name"] == "run-1"
+    assert manifest_entry["run_dir"] == "run-1"
     assert manifest_entry["metadata"]["device_id"] == "emulator-5554"
     assert str(saved_path) in stdout.getvalue()
     with Image.open(saved_path) as saved_image:
@@ -122,6 +128,7 @@ def test_devices_json_output_includes_sdk_metadata() -> None:
     assert exit_code == 0
     assert '"device_id": "emulator-5554"' in stdout.getvalue()
     assert '"adb.target_kind": "emulator"' in stdout.getvalue()
+    assert '"adb.android_sdk": "34"' in stdout.getvalue()
 
 
 def make_device_info(device_id: str, *, display_name: str | None = None) -> DeviceInfo:
@@ -131,7 +138,10 @@ def make_device_info(device_id: str, *, display_name: str | None = None) -> Devi
             device_id=device_id,
             display_name=display_name or device_id,
         ),
-        metadata={"adb.target_kind": "emulator"},
+        metadata={
+            "adb.target_kind": "emulator",
+            "adb.android_sdk": "34",
+        },
     )
 
 

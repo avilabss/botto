@@ -101,7 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
     capture_parser.add_argument(
         "--label",
         default="device-capture",
-        help="Filename stem for the saved screenshot; '.png' is appended.",
+        help="Filename stem for the saved screenshot under the run's images/ directory.",
+    )
+    capture_parser.add_argument(
+        "--run-name",
+        help="Run directory name under --output-dir. Defaults to a timestamped unique name.",
     )
     capture_parser.add_argument(
         "--json",
@@ -169,7 +173,10 @@ async def _run_command(
 
     if args.command == "capture":
         _validate_capture_label(args.label)
-        artifact_store = ArtifactStore(Path(args.output_dir))
+        try:
+            artifact_store = ArtifactStore(Path(args.output_dir), run_name=args.run_name)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
         session = await _open_selected_session(backend, requested_device_id=args.device)
         try:
             image = await session.screenshot()
@@ -189,6 +196,7 @@ async def _run_command(
                 "session_id": session.info.session_id,
                 "saved_path": str(saved_path),
                 "output_dir": str(artifact_store.root),
+                "run_dir": str(artifact_store.run_dir),
                 "frame": {
                     "size": {
                         "width": image.size.width,

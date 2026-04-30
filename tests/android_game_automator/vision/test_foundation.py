@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from android_game_automator.image import (
     FrameImage,
+    get_color,
     intersect_regions,
     pixel_color_matches,
     probe_color,
@@ -24,9 +25,9 @@ from android_game_automator.types import (
     Size,
     Viewport,
 )
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from android_game_automator.vision import find_template
+from android_game_automator.vision import FeatureMatch, find_feature_match, find_template
 
 
 def test_frame_image_exposes_pixel_array() -> None:
@@ -50,6 +51,24 @@ def test_frame_image_save_persists_png(tmp_path) -> None:  # noqa: ANN001
         assert image.mode == "RGBA"
         assert image.size == (2, 2)
         assert image.getpixel((0, 0)) == (255, 0, 0, 255)
+
+
+def test_get_color_reads_absolute_points() -> None:
+    image = _rgba_image()
+
+    assert get_color(image, Point(x=1, y=0)) == (0, 255, 0, 255)
+
+
+def test_get_color_reads_normalized_points_with_viewport() -> None:
+    image = _rgba_image()
+    viewport = Viewport(surface_size=image.size, region=Rect(left=1, top=1, width=1, height=1))
+
+    assert get_color(image, NormalizedPoint(x=0.0, y=0.0), viewport=viewport) == (
+        255,
+        255,
+        0,
+        255,
+    )
 
 
 def test_resolve_region_and_crop_support_normalized_and_absolute_rois() -> None:
@@ -176,6 +195,41 @@ def test_find_template_supports_frame_image_pil_path_and_threshold_alias(tmp_pat
     assert match.confidence >= 0.4
 
 
+def test_find_feature_match_uses_orb_and_respects_roi() -> None:
+    image, template = _feature_scene_image()
+
+    match = find_feature_match(image, template, min_matches=8, min_confidence=0.25)
+
+    assert isinstance(match, FeatureMatch)
+    assert match.match_count >= 8
+    assert match.confidence >= 0.25
+    assert match.bounds.left == pytest.approx(70, abs=4)
+    assert match.bounds.top == pytest.approx(55, abs=4)
+    assert match.bounds.width == pytest.approx(120, abs=8)
+    assert match.bounds.height == pytest.approx(90, abs=8)
+    assert match.center.x == pytest.approx(130, abs=6)
+    assert match.center.y == pytest.approx(100, abs=6)
+
+    roi_match = find_feature_match(
+        image,
+        template,
+        region=Rect(left=60, top=45, width=150, height=120),
+        min_matches=8,
+        min_confidence=0.25,
+    )
+    assert isinstance(roi_match, FeatureMatch)
+    assert (
+        find_feature_match(
+            image,
+            template,
+            region=Rect(left=0, top=0, width=40, height=40),
+            min_matches=8,
+            min_confidence=0.25,
+        )
+        is None
+    )
+
+
 def test_find_template_validates_threshold_scales_and_rotations() -> None:
     image = _template_scene_image(scale=1)
     template = _template_image()
@@ -188,6 +242,12 @@ def test_find_template_validates_threshold_scales_and_rotations() -> None:
 
     with pytest.raises(ValueError, match="rotations"):
         find_template(image, template, rotations=(float("nan"),))
+
+    with pytest.raises(ValueError, match="min_matches"):
+        find_feature_match(image, template, min_matches=3)
+
+    with pytest.raises(ValueError, match="min_confidence"):
+        find_feature_match(image, template, min_confidence=1.1)
 
 
 def _rgba_image(*, frame_id: str | None = None) -> FrameImage:
@@ -268,3 +328,38 @@ def _rotated_template_scene_image(*, rotation: float) -> FrameImage:
         data=scene.tobytes(),
         captured_at=datetime.now(UTC),
     )
+
+
+def _feature_scene_image() -> tuple[FrameImage, FrameImage]:
+    template = _feature_template_image()
+    scene = Image.new("RGBA", (260, 220), (80, 80, 80, 255))
+    scene.paste(template, (70, 55))
+
+    return (
+        FrameImage(
+            size=Size(width=scene.width, height=scene.height),
+            pixel_format=PixelFormat.RGBA32,
+            data=scene.tobytes(),
+            captured_at=datetime.now(UTC),
+        ),
+        FrameImage(
+            size=Size(width=template.width, height=template.height),
+            pixel_format=PixelFormat.RGBA32,
+            data=template.tobytes(),
+            captured_at=datetime.now(UTC),
+        ),
+    )
+
+
+def _feature_template_image() -> Image.Image:
+    image = Image.new("RGBA", (120, 90), (240, 240, 240, 255))
+    draw = ImageDraw.Draw(image)
+    for x in range(10, 110, 20):
+        draw.line((x, 5, 120 - x, 85), fill=(0, 0, 0, 255), width=3)
+    for y in range(10, 90, 20):
+        draw.ellipse((5, y, 17, y + 12), fill=(255, 0, 0, 255))
+        draw.rectangle((95, y, 110, y + 10), fill=(0, 0, 255, 255))
+    draw.polygon([(60, 10), (80, 40), (50, 60), (35, 30)], outline=(0, 128, 0, 255), width=3)
+    for x, y in ((30, 20), (70, 70), (15, 70), (100, 20), (60, 45)):
+        draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=(0, 0, 0, 255))
+    return image

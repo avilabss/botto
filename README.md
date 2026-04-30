@@ -10,8 +10,9 @@ This repository now separates the reusable SDK from the future game bot app:
 - Milestone focus: **ADB-only foundation**.
 - Implemented: shared data types plus ADB-backed device discovery,
   async sessions, screenshot capture, app lifecycle helpers, direct input
-  execution, viewport-aware coordinate mapping, ROI-first template matching,
-  and OCR-ready vision helpers.
+  execution with common `AndroidKey` enums, viewport-aware coordinate mapping,
+  ROI-first template and ORB feature matching, OCR-ready vision helpers, and
+  run-organized artifact output.
 - `botto` reference flows: list devices, inspect a live session, and capture a screenshot to a PNG file.
 - Not implemented yet: actual Clash of Clans automation logic.
 
@@ -64,15 +65,20 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-See `quick_run.py` for the same launch/capture/save/close flow as a local
-learning harness, and `docs/android-game-automator-sdk.md` for template matching,
-OCR, and advanced API examples.
+Each `ArtifactStore` instance writes all saves to one run directory, named like
+`YYYYMMDD-HHMMSS-xxxxxxxx` by default, such as
+`botto-output/<run>/images/clash-of-clans.png`. Construct a new store without a
+`run_name` to start a new default run. The run-local `manifest.jsonl` records
+artifact paths relative to the artifact root, including the run folder. See
+`quick_run.py` for the same launch/capture/save/close flow as a local learning
+harness, and `docs/android-game-automator-sdk.md` for template matching, ORB
+feature matching, OCR, and advanced API examples.
 
 ## Module layout
 
 - `android_game_automator.types` — shared device, geometry, pixel, match, and OCR block models.
 - `android_game_automator.image` — frame images, ROI utilities, and pixel/color probes.
-- `android_game_automator.vision` — template matching helpers.
+- `android_game_automator.vision` — template and ORB feature matching helpers.
 - `android_game_automator.ocr` — OCR helpers.
 - `android_game_automator.artifacts` — simple local artifact persistence.
 - `android_game_automator.adb` — ADB discovery/session/input/capture layer.
@@ -83,7 +89,7 @@ OCR, and advanced API examples.
 - `python -m botto` shows the reference CLI help.
 - `python -m botto devices` lists adb devices through `AdbDeviceBackend`.
 - `python -m botto session --device <serial>` inspects a live session and current display metadata.
-- `python -m botto capture --device <serial>` captures a screenshot and saves `.botto-output/device-capture.png` by default.
+- `python -m botto capture --device <serial>` captures a screenshot and saves it under `.botto-output/<run>/images/device-capture.png` by default.
 
 ## Entrypoint
 

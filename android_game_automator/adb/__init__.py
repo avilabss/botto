@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .device import AdbDeviceBackend, AdbDeviceSession, AdbDisplayState
+from .device import AdbDeviceBackend, AdbDeviceSession, AdbDisplayState, AndroidKey
 from .errors import (
     AdbBackendError,
     AdbDeviceDiscoveryError,
@@ -22,4 +22,5 @@ __all__ = [
     "AdbDisplayStateError",
     "AdbFrameCaptureError",
     "AdbSessionClosedError",
+    "AndroidKey",
 ]

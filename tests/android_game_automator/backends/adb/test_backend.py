@@ -15,6 +15,7 @@ from android_game_automator.adb import (
     AdbDisplayState,
     AdbFrameCaptureError,
     AdbSessionClosedError,
+    AndroidKey,
 )
 from android_game_automator.adb._types import AdbListedDevice
 from android_game_automator.types import (
@@ -215,9 +216,19 @@ def test_backend_lists_usable_devices_from_adb_server() -> None:
 
 
 def test_device_listing_accepts_samsung_serial_from_adb_server_payload() -> None:
+    device = FakeAdbDevice(
+        "R5CT316NY7H",
+        shell_outputs={
+            "getprop ro.product.manufacturer": "Samsung\n",
+            "getprop ro.product.model": "SM-S928B\n",
+            "getprop ro.build.version.release": "15\n",
+            "getprop ro.build.version.sdk": "35\n",
+        },
+    )
     backend = AdbDeviceBackend(
         client=FakeAdbClient(
             device_list_payload="R5CT316NY7H\tdevice\n",
+            devices={"R5CT316NY7H": device},
             list_error=AssertionError("AdbClient.list must not be used for discovery"),
         )
     )
@@ -226,6 +237,11 @@ def test_device_listing_accepts_samsung_serial_from_adb_server_payload() -> None
 
     assert tuple(device.identity.device_id for device in devices) == ("R5CT316NY7H",)
     assert devices[0].metadata["adb.state"] == "device"
+    assert devices[0].metadata["adb.manufacturer"] == "Samsung"
+    assert devices[0].metadata["adb.model"] == "SM-S928B"
+    assert devices[0].metadata["adb.android_release"] == "15"
+    assert devices[0].metadata["adb.android_sdk"] == "35"
+    assert devices[0].identity.display_name == "Samsung SM-S928B"
 
 
 def test_device_listing_contains_transport_errors_in_backend_exception() -> None:
@@ -345,11 +361,11 @@ def test_session_convenience_methods_execute_expected_adb_commands() -> None:
 
     asyncio.run(session.tap(0.5, 0.25, hold_ms=50))
     asyncio.run(session.swipe(0.0, 0.0, 1.0, 1.0))
-    asyncio.run(session.key("BACK"))
+    asyncio.run(session.key(AndroidKey.BACK))
     asyncio.run(session.text("hello world"))
     asyncio.run(session.launch_app("com.example.game"))
     asyncio.run(session.close_app("com.example.game"))
-    asyncio.run(session.key("HOME"))
+    asyncio.run(session.key(AndroidKey.HOME))
 
     assert [call[0] for call in device.shell_calls] == [
         "dumpsys input",

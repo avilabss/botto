@@ -23,3 +23,5 @@ ARCHITECTURE.md
 /quick_run.py
 /.botto-output
 /botto-output
+/.botto-artifacts
+/botto-artifacts
