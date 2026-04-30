@@ -17,7 +17,18 @@ from android_game_automator.types import (
     Size,
 )
 from botto.cli import run
+from botto.screens import BaseScreen, Overlay, ScreenAnalysis
 from PIL import Image
+
+_TIMING_FIELDS = {
+    "open_session",
+    "launch_app",
+    "launch_wait",
+    "screenshot",
+    "analysis",
+    "artifact_save",
+    "total",
+}
 
 
 def test_session_uses_backend_default_device_selection() -> None:
@@ -69,9 +80,7 @@ def test_capture_saves_png_for_selected_device(tmp_path: Path) -> None:
     assert stderr.getvalue() == ""
     saved_path = tmp_path / "run-1" / "images" / "capture.png"
     assert saved_path.is_file()
-    manifest_entry = json.loads(
-        (tmp_path / "run-1" / "manifest.jsonl").read_text(encoding="utf-8")
-    )
+    manifest_entry = json.loads((tmp_path / "run-1" / "manifest.jsonl").read_text(encoding="utf-8"))
     assert manifest_entry["kind"] == "image"
     assert manifest_entry["path"] == "run-1/images/capture.png"
     assert manifest_entry["run_name"] == "run-1"
@@ -108,9 +117,7 @@ def test_capture_defaults_to_botto_artifacts_dir(
         stderr=stderr,
     )
 
-    saved_path = (
-        tmp_path / ".botto-artifacts" / "run-1" / "images" / "device-capture.png"
-    )
+    saved_path = tmp_path / ".botto-artifacts" / "run-1" / "images" / "device-capture.png"
     assert exit_code == 0
     assert stderr.getvalue() == ""
     assert saved_path.is_file()
@@ -147,6 +154,53 @@ def test_capture_rejects_label_paths_before_opening_backend(tmp_path: Path) -> N
     assert not (tmp_path / "escape.png").exists()
 
 
+def test_analyze_prints_json_and_saves_artifacts_for_selected_serial(tmp_path: Path) -> None:
+    stdout = StringIO()
+    stderr = StringIO()
+    session = FakeSession(device_id="emulator-5554")
+
+    exit_code = run(
+        [
+            "analyze",
+            "--serial",
+            "emulator-5554",
+            "--output-dir",
+            str(tmp_path),
+            "--run-name",
+            "run-1",
+            "--skip-launch",
+        ],
+        backend_factory=lambda: FakeBackend(
+            devices=(make_device_info("emulator-5554"),),
+            session=session,
+        ),
+        screen_analyzer=lambda image: ScreenAnalysis(
+            base_screen=BaseScreen.UNKNOWN,
+            overlay=Overlay.NONE,
+            confidence=0.0,
+        ),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert payload["device_id"] == "emulator-5554"
+    assert payload["launched"] is False
+    assert payload["analysis"]["base_screen"] == "unknown"
+    assert (
+        Path(payload["artifacts"]["screenshot"]) == tmp_path / "run-1" / "images" / "screenshot.png"
+    )
+    assert Path(payload["artifacts"]["analysis_json"]) == (
+        tmp_path / "run-1" / "json" / "screen-analysis.json"
+    )
+    _assert_timings(payload["timings"])
+    assert (tmp_path / "run-1" / "images" / "screenshot.png").is_file()
+    assert (tmp_path / "run-1" / "json" / "screen-analysis.json").is_file()
+    assert session.launched_packages == []
+
+
 def test_devices_json_output_includes_sdk_metadata() -> None:
     stdout = StringIO()
 
@@ -177,6 +231,14 @@ def make_device_info(device_id: str, *, display_name: str | None = None) -> Devi
             "adb.android_sdk": "34",
         },
     )
+
+
+def _assert_timings(timings: object) -> None:
+    assert isinstance(timings, dict)
+    assert set(timings) == _TIMING_FIELDS
+    for value in timings.values():
+        assert isinstance(value, int | float)
+        assert value >= 0.0
 
 
 class FakeBackend:
@@ -216,6 +278,7 @@ class FakeSession:
             metadata={"adb.target_kind": "emulator"},
         )
         self.closed = False
+        self.launched_packages: list[str] = []
 
     @property
     def info(self) -> SessionInfo:
@@ -223,6 +286,9 @@ class FakeSession:
 
     async def close(self) -> None:
         self.closed = True
+
+    async def launch_app(self, package_name: str) -> None:
+        self.launched_packages.append(package_name)
 
     async def screenshot(self) -> FrameImage:
         return self._image

@@ -11,10 +11,19 @@ from importlib import metadata
 from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol, TextIO
 
-from android_game_automator.adb import AdbDeviceBackend
 from android_game_automator.artifacts import ArtifactStore
 from android_game_automator.image import FrameImage
 from android_game_automator.types import DeviceInfo, SessionInfo
+
+from android_game_automator.adb import AdbDeviceBackend
+from botto.runner import (
+    DEFAULT_ARTIFACT_ROOT,
+    DEFAULT_CLASH_PACKAGE,
+    DEFAULT_LAUNCH_WAIT_SECONDS,
+    ScreenAnalyzer,
+    analyze_once,
+)
+from botto.screen_detector import analyze_screen
 
 
 class _Session(Protocol):
@@ -22,6 +31,8 @@ class _Session(Protocol):
     def info(self) -> SessionInfo: ...
 
     async def close(self) -> None: ...
+
+    async def launch_app(self, package_name: str) -> None: ...
 
     async def screenshot(self) -> FrameImage: ...
 
@@ -95,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capture_parser.add_argument(
         "--output-dir",
-        default=".botto-artifacts",
+        default=DEFAULT_ARTIFACT_ROOT,
         help="Directory where the PNG screenshot is saved.",
     )
     capture_parser.add_argument(
@@ -112,6 +123,42 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output.",
     )
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Capture one screenshot and save read-only screen analysis artifacts.",
+    )
+    analyze_parser.add_argument(
+        "--serial",
+        "--device",
+        dest="device",
+        help="ADB device serial. If omitted, the only connected device is used.",
+    )
+    analyze_parser.add_argument(
+        "--output-dir",
+        default=DEFAULT_ARTIFACT_ROOT,
+        help="Directory where the screenshot and analysis artifacts are saved.",
+    )
+    analyze_parser.add_argument(
+        "--run-name",
+        help="Run directory name under --output-dir. Defaults to a timestamped unique name.",
+    )
+    analyze_parser.add_argument(
+        "--package",
+        default=DEFAULT_CLASH_PACKAGE,
+        help="Android package to launch before capture.",
+    )
+    analyze_parser.add_argument(
+        "--skip-launch",
+        action="store_true",
+        help="Analyze the current screen without launching the app first.",
+    )
+    analyze_parser.add_argument(
+        "--launch-wait-seconds",
+        type=float,
+        default=DEFAULT_LAUNCH_WAIT_SECONDS,
+        help="Seconds to wait after launch before capturing a screenshot.",
+    )
     return parser
 
 
@@ -119,6 +166,7 @@ def run(
     argv: Sequence[str] | None = None,
     *,
     backend_factory: _BackendFactory = AdbDeviceBackend,
+    screen_analyzer: ScreenAnalyzer | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
@@ -138,6 +186,7 @@ def run(
             _run_command(
                 args,
                 backend_factory=backend_factory,
+                screen_analyzer=screen_analyzer,
                 stdout=resolved_stdout,
             )
         )
@@ -153,6 +202,7 @@ async def _run_command(
     args: argparse.Namespace,
     *,
     backend_factory: _BackendFactory,
+    screen_analyzer: ScreenAnalyzer | None,
     stdout: TextIO,
 ) -> int:
     backend = backend_factory()
@@ -212,6 +262,25 @@ async def _run_command(
             as_json=args.json,
             stdout=stdout,
         )
+        return 0
+
+    if args.command == "analyze":
+        if args.launch_wait_seconds < 0:
+            raise CliError("--launch-wait-seconds must be >= 0.")
+        try:
+            payload = await analyze_once(
+                device_id=args.device,
+                artifact_root=args.output_dir,
+                run_name=args.run_name,
+                package_name=args.package,
+                launch=not args.skip_launch,
+                launch_wait_seconds=args.launch_wait_seconds,
+                backend=backend,
+                screen_analyzer=screen_analyzer if screen_analyzer is not None else analyze_screen,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        _write_payload(payload, as_json=True, stdout=stdout)
         return 0
 
     raise CliError(f"Unsupported command {args.command!r}")

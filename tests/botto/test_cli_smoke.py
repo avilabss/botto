@@ -28,7 +28,7 @@ def test_botto_module_entrypoint_help() -> None:
     )
 
     assert completed.returncode == 0
-    assert "{devices,session,capture}" in completed.stdout
+    assert "{devices,session,capture,analyze}" in completed.stdout
 
 
 def test_botto_module_entrypoint_version() -> None:
