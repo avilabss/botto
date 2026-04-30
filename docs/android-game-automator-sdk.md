@@ -70,10 +70,12 @@ panel_center_color = get_color(
 )
 ```
 
-ADB input methods also use normalized display coordinates:
+ADB input methods accept the same point objects. Use `Point` for absolute
+display pixels or `NormalizedPoint` for coordinates that should map through the
+current display viewport:
 
 ```python
-await session.tap(0.50, 0.50)  # tap the display center
+await session.tap(NormalizedPoint(x=0.50, y=0.50))  # tap the display center
 ```
 
 ## ADB setup check
@@ -316,20 +318,14 @@ async def main() -> None:
 
         print(f"found {match.match_count} feature matches at {match.center}")
 
-        # match.center is an absolute pixel Point in this screenshot.
-        # session.tap(...) currently expects normalized display coordinates.
-        await session.tap(
-            match.center.x / image.width,
-            match.center.y / image.height,
-        )
+        await session.tap(match.center)
 
 
 asyncio.run(main())
 ```
 
-`match.center` is an absolute pixel `Point` in the source image. Because
-`session.tap(...)` currently expects normalized coordinates, divide the pixel
-point by `image.width` and `image.height` before tapping it.
+`match.center` is an absolute pixel `Point` in the source image, so it can be
+passed directly to `session.tap(...)`.
 
 ## OCR
 
@@ -368,20 +364,37 @@ OCR works best when the region is as small as practical.
 
 ## Input and `AndroidKey` enum usage
 
-`tap` and `swipe` take normalized display coordinates. `key` accepts an
+`tap`, `swipe`, and `multi_swipe` take `Point` or `NormalizedPoint` inputs.
+`multi_swipe`, `pinch_in`, and `pinch_out` are best-effort ADB multi-touch APIs:
+they issue concurrent `input swipe` commands, but plain ADB does not guarantee
+true multi-touch on every device, Android version, or game. `key` accepts an
 `AndroidKey` enum member or a safe raw key string:
 
 ```python
 import asyncio
 
 from android_game_automator.adb import AdbDeviceBackend, AndroidKey
+from android_game_automator.types import NormalizedPoint
 
 
 async def main() -> None:
     backend = AdbDeviceBackend()
     async with await backend.open_session("emulator-5554") as session:
-        await session.tap(0.50, 0.50)
-        await session.swipe(0.20, 0.80, 0.80, 0.80, duration_ms=250)
+        await session.tap(NormalizedPoint(x=0.50, y=0.50))
+        await session.swipe(
+            NormalizedPoint(x=0.20, y=0.80),
+            NormalizedPoint(x=0.80, y=0.80),
+            duration_ms=250,
+        )
+        await session.multi_swipe(
+            (
+                (NormalizedPoint(x=0.20, y=0.70), NormalizedPoint(x=0.45, y=0.70)),
+                (NormalizedPoint(x=0.80, y=0.70), NormalizedPoint(x=0.55, y=0.70)),
+            ),
+            duration_ms=300,
+        )
+        await session.pinch_in(duration_ms=300)
+        await session.pinch_out(center=NormalizedPoint(x=0.50, y=0.50), duration_ms=300)
         await session.key(AndroidKey.BACK)
         await session.key(AndroidKey.HOME)
         await session.text("hello world")
@@ -391,3 +404,5 @@ asyncio.run(main())
 ```
 
 Prefer `AndroidKey` for common keys so scripts avoid hardcoded keyevent strings.
+Pinch spans default to sensible normalized distances around the display center;
+custom spans are normalized against the smaller display dimension.

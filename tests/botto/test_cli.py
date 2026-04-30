@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 
+import pytest
 from android_game_automator.image import FrameImage
 from android_game_automator.types import (
     DeviceIdentity,
@@ -81,6 +82,39 @@ def test_capture_saves_png_for_selected_device(tmp_path: Path) -> None:
         assert saved_image.mode == "RGBA"
         assert saved_image.size == (1, 1)
         assert saved_image.getpixel((0, 0)) == (0, 0, 0, 255)
+
+
+def test_capture_defaults_to_botto_artifacts_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = StringIO()
+    stderr = StringIO()
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = run(
+        [
+            "capture",
+            "--device",
+            "emulator-5554",
+            "--run-name",
+            "run-1",
+        ],
+        backend_factory=lambda: FakeBackend(
+            devices=(make_device_info("emulator-5554"),),
+            session=FakeSession(device_id="emulator-5554"),
+        ),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    saved_path = (
+        tmp_path / ".botto-artifacts" / "run-1" / "images" / "device-capture.png"
+    )
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert saved_path.is_file()
+    assert ".botto-artifacts/run-1/images/device-capture.png" in stdout.getvalue()
 
 
 def test_capture_rejects_label_paths_before_opening_backend(tmp_path: Path) -> None:

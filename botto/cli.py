@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capture_parser.add_argument(
         "--output-dir",
-        default=".botto-output",
+        default=".botto-artifacts",
         help="Directory where the PNG screenshot is saved.",
     )
     capture_parser.add_argument(

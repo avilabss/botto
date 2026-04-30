@@ -382,6 +382,186 @@ def test_session_convenience_methods_execute_expected_adb_commands() -> None:
     ]
 
 
+def test_absolute_point_input_methods_do_not_query_display_state() -> None:
+    device = FakeAdbDevice("emulator-5554")
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+
+    asyncio.run(session.tap(Point(x=500, y=800)))
+    asyncio.run(session.swipe(Point(x=10, y=20), Point(x=30, y=40), duration_ms=250))
+
+    assert device.shell_calls == [
+        ("input tap 500 800", "utf-8"),
+        ("input swipe 10 20 30 40 250", "utf-8"),
+    ]
+
+
+def test_normalized_point_input_methods_map_through_display_state() -> None:
+    device = FakeAdbDevice(
+        "emulator-5554",
+        shell_outputs={
+            "dumpsys input": "SurfaceOrientation: 0",
+            "wm size": "Physical size: 100x200",
+        },
+    )
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+
+    asyncio.run(session.tap(NormalizedPoint(x=0.5, y=0.25), hold_ms=50))
+    asyncio.run(
+        session.swipe(
+            NormalizedPoint(x=0.0, y=0.0),
+            NormalizedPoint(x=1.0, y=1.0),
+        )
+    )
+
+    assert [call[0] for call in device.shell_calls] == [
+        "dumpsys input",
+        "wm size",
+        "input swipe 50 50 50 50 50",
+        "dumpsys input",
+        "wm size",
+        "input swipe 0 0 99 199 120",
+    ]
+
+
+def test_multi_swipe_absolute_points_do_not_query_display_state() -> None:
+    device = FakeAdbDevice("emulator-5554")
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+
+    asyncio.run(
+        session.multi_swipe(
+            (
+                (Point(x=10, y=20), Point(x=30, y=40)),
+                (Point(x=50, y=60), Point(x=70, y=80)),
+            ),
+            duration_ms=250,
+        )
+    )
+
+    assert device.shell_calls == [
+        ("input swipe 10 20 30 40 250", "utf-8"),
+        ("input swipe 50 60 70 80 250", "utf-8"),
+    ]
+
+
+def test_multi_swipe_normalized_points_map_through_display_state_once() -> None:
+    device = FakeAdbDevice(
+        "emulator-5554",
+        shell_outputs={
+            "dumpsys input": "SurfaceOrientation: 0",
+            "wm size": "Physical size: 100x200",
+        },
+    )
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+
+    asyncio.run(
+        session.multi_swipe(
+            (
+                (NormalizedPoint(x=0.0, y=0.0), NormalizedPoint(x=1.0, y=1.0)),
+                (Point(x=10, y=20), NormalizedPoint(x=0.5, y=0.25)),
+            ),
+            duration_ms=300,
+        )
+    )
+
+    assert [call[0] for call in device.shell_calls] == [
+        "dumpsys input",
+        "wm size",
+        "input swipe 0 0 99 199 300",
+        "input swipe 10 20 50 50 300",
+    ]
+
+
+def test_pinch_helpers_generate_best_effort_swipe_commands() -> None:
+    device = FakeAdbDevice(
+        "emulator-5554",
+        shell_outputs={
+            "dumpsys input": "SurfaceOrientation: 0",
+            "wm size": "Physical size: 100x200",
+        },
+    )
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+
+    asyncio.run(session.pinch_in(inner_span=0.20, outer_span=0.60, duration_ms=400))
+    asyncio.run(session.pinch_out(inner_span=0.20, outer_span=0.60, duration_ms=500))
+
+    assert [call[0] for call in device.shell_calls] == [
+        "dumpsys input",
+        "wm size",
+        "input swipe 20 100 40 100 400",
+        "input swipe 80 100 60 100 400",
+        "dumpsys input",
+        "wm size",
+        "input swipe 40 100 20 100 500",
+        "input swipe 60 100 80 100 500",
+    ]
+
+
+def test_multi_touch_helpers_reject_invalid_inputs_before_shelling_out() -> None:
+    device = FakeAdbDevice("emulator-5554")
+    backend = AdbDeviceBackend(
+        client=FakeAdbClient(
+            listed_devices=[FakeListedDevice(serial="emulator-5554", state="device")],
+            devices={"emulator-5554": device},
+        )
+    )
+    session = asyncio.run(backend.open_session("emulator-5554"))
+    device.shell_calls.clear()
+
+    with pytest.raises(ValueError, match="at least two strokes"):
+        asyncio.run(session.multi_swipe(((Point(x=1, y=1), Point(x=2, y=2)),)))
+    with pytest.raises(ValueError, match="duration_ms"):
+        asyncio.run(
+            session.multi_swipe(
+                (
+                    (Point(x=1, y=1), Point(x=2, y=2)),
+                    (Point(x=3, y=3), Point(x=4, y=4)),
+                ),
+                duration_ms=0,
+            )
+        )
+    with pytest.raises(ValueError, match="pinch spans"):
+        asyncio.run(session.pinch_in(inner_span=0.60, outer_span=0.20))
+    with pytest.raises(ValueError, match="duration_ms"):
+        asyncio.run(session.pinch_out(duration_ms=0))
+
+    assert device.shell_calls == []
+
+
 def test_session_rejects_unsafe_package_names_before_shelling_out() -> None:
     device = FakeAdbDevice("emulator-5554")
     backend = AdbDeviceBackend(

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import TracebackType
-from typing import Self
+from typing import Self, overload
 from uuid import uuid4
 
 from adbutils_async import AdbClient  # type: ignore[import-untyped]
@@ -19,6 +21,7 @@ from android_game_automator.types import (
     DeviceInfo,
     NormalizedPoint,
     Point,
+    ScreenPoint,
     SessionInfo,
     Size,
     Viewport,
@@ -48,6 +51,10 @@ _PROP_ANDROID_RELEASE = "ro.build.version.release"
 _PROP_ANDROID_SDK = "ro.build.version.sdk"
 _ANDROID_PACKAGE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
 _ANDROID_KEY_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
+_DEFAULT_PINCH_INNER_SPAN = 0.20
+_DEFAULT_PINCH_OUTER_SPAN = 0.60
+_DEFAULT_PINCH_DURATION_MS = 300
+_DEFAULT_PINCH_CENTER = NormalizedPoint(x=0.5, y=0.5)
 
 
 class AndroidKey(StrEnum):
@@ -274,13 +281,35 @@ class AdbDeviceSession:
             errors[-1] if errors else None
         )
 
-    async def tap(self, x: float, y: float, *, hold_ms: int = 0) -> None:
-        """Tap normalized display coordinates."""
+    @overload
+    async def tap(self, x: ScreenPoint, *, hold_ms: int = 0) -> None: ...
+
+    @overload
+    async def tap(self, x: float, y: float, *, hold_ms: int = 0) -> None: ...
+
+    async def tap(
+        self,
+        x: ScreenPoint | float,
+        y: float | None = None,
+        *,
+        hold_ms: int = 0,
+    ) -> None:
+        """Tap an absolute or normalized screen point."""
         self._ensure_open()
-        viewport = (await self.get_display_state()).viewport
-        point = _resolve_normalized_display_point(x, y, viewport)
+        point = await self._resolve_tap_point(x, y)
         await self._run_shell(_build_tap_shell_command(point, hold_ms=hold_ms))
 
+    @overload
+    async def swipe(
+        self,
+        start: ScreenPoint,
+        end: ScreenPoint,
+        /,
+        *,
+        duration_ms: int = 120,
+    ) -> None: ...
+
+    @overload
     async def swipe(
         self,
         start_x: float,
@@ -289,13 +318,79 @@ class AdbDeviceSession:
         end_y: float,
         *,
         duration_ms: int = 120,
+    ) -> None: ...
+
+    async def swipe(
+        self,
+        start_x: ScreenPoint | float,
+        start_y: ScreenPoint | float,
+        end_x: float | None = None,
+        end_y: float | None = None,
+        *,
+        duration_ms: int = 120,
     ) -> None:
-        """Swipe between normalized display coordinates."""
+        """Swipe between absolute or normalized screen points."""
         self._ensure_open()
-        viewport = (await self.get_display_state()).viewport
-        start = _resolve_normalized_display_point(start_x, start_y, viewport)
-        end = _resolve_normalized_display_point(end_x, end_y, viewport)
+        start, end = await self._resolve_swipe_points(start_x, start_y, end_x, end_y)
         await self._run_shell(_build_swipe_shell_command(start, end, duration_ms=duration_ms))
+
+    async def multi_swipe(
+        self,
+        strokes: Sequence[tuple[ScreenPoint, ScreenPoint]],
+        *,
+        duration_ms: int = 120,
+    ) -> None:
+        """Run multiple swipes concurrently as best-effort ADB multi-touch.
+
+        Plain ADB does not guarantee true multi-touch injection on every device or app; this
+        method concurrently issues one ``input swipe`` command per stroke as a best-effort API.
+        """
+        self._ensure_open()
+        if duration_ms <= 0:
+            raise ValueError("duration_ms must be > 0")
+
+        resolved_strokes = await self._resolve_multi_swipe_strokes(strokes)
+        commands = tuple(
+            _build_swipe_shell_command(start, end, duration_ms=duration_ms)
+            for start, end in resolved_strokes
+        )
+        await asyncio.gather(*(self._run_shell(command) for command in commands))
+
+    async def pinch_in(
+        self,
+        *,
+        center: ScreenPoint | None = None,
+        inner_span: float = _DEFAULT_PINCH_INNER_SPAN,
+        outer_span: float = _DEFAULT_PINCH_OUTER_SPAN,
+        duration_ms: int = _DEFAULT_PINCH_DURATION_MS,
+    ) -> None:
+        """Best-effort two-finger pinch inward around a display point."""
+        await self._pinch(
+            center=center,
+            start_span=outer_span,
+            end_span=inner_span,
+            inner_span=inner_span,
+            outer_span=outer_span,
+            duration_ms=duration_ms,
+        )
+
+    async def pinch_out(
+        self,
+        *,
+        center: ScreenPoint | None = None,
+        inner_span: float = _DEFAULT_PINCH_INNER_SPAN,
+        outer_span: float = _DEFAULT_PINCH_OUTER_SPAN,
+        duration_ms: int = _DEFAULT_PINCH_DURATION_MS,
+    ) -> None:
+        """Best-effort two-finger pinch outward around a display point."""
+        await self._pinch(
+            center=center,
+            start_span=inner_span,
+            end_span=outer_span,
+            inner_span=inner_span,
+            outer_span=outer_span,
+            duration_ms=duration_ms,
+        )
 
     async def key(self, key: AndroidKey | str) -> None:
         """Press an Android key by enum, raw safe name, or numeric key code."""
@@ -384,6 +479,119 @@ class AdbDeviceSession:
         if self._closed:
             raise AdbSessionClosedError("ADB session is closed.")
 
+    async def _resolve_tap_point(self, x: ScreenPoint | float, y: float | None) -> Point:
+        if isinstance(x, Point):
+            if y is not None:
+                raise TypeError("tap() accepts either a ScreenPoint or normalized x/y floats")
+            return x
+
+        if isinstance(x, NormalizedPoint):
+            if y is not None:
+                raise TypeError("tap() accepts either a ScreenPoint or normalized x/y floats")
+            viewport = (await self.get_display_state()).viewport
+            return _resolve_screen_point(x, viewport)
+
+        if y is None:
+            raise TypeError("tap() missing y coordinate for normalized float form")
+
+        viewport = (await self.get_display_state()).viewport
+        return _resolve_normalized_display_point(x, y, viewport)
+
+    async def _resolve_swipe_points(
+        self,
+        start_x: ScreenPoint | float,
+        start_y: ScreenPoint | float,
+        end_x: float | None,
+        end_y: float | None,
+    ) -> tuple[Point, Point]:
+        if end_x is None and end_y is None:
+            if isinstance(start_x, (Point, NormalizedPoint)) and isinstance(
+                start_y,
+                (Point, NormalizedPoint),
+            ):
+                return await self._resolve_screen_points(start_x, start_y)
+            raise TypeError(
+                "swipe() accepts either start/end ScreenPoints or normalized x/y floats"
+            )
+
+        if end_x is None or end_y is None:
+            raise TypeError("swipe() normalized float form requires start_x, start_y, end_x, end_y")
+        if isinstance(start_x, (Point, NormalizedPoint)) or isinstance(
+            start_y,
+            (Point, NormalizedPoint),
+        ):
+            raise TypeError(
+                "swipe() accepts either start/end ScreenPoints or normalized x/y floats"
+            )
+
+        viewport = (await self.get_display_state()).viewport
+        start = _resolve_normalized_display_point(start_x, start_y, viewport)
+        end = _resolve_normalized_display_point(end_x, end_y, viewport)
+        return start, end
+
+    async def _resolve_screen_points(
+        self,
+        start: ScreenPoint,
+        end: ScreenPoint,
+    ) -> tuple[Point, Point]:
+        if isinstance(start, NormalizedPoint) or isinstance(end, NormalizedPoint):
+            viewport = (await self.get_display_state()).viewport
+        else:
+            viewport = None
+        return _resolve_screen_point(start, viewport), _resolve_screen_point(end, viewport)
+
+    async def _resolve_multi_swipe_strokes(
+        self,
+        strokes: Sequence[tuple[ScreenPoint, ScreenPoint]],
+    ) -> tuple[tuple[Point, Point], ...]:
+        stroke_pairs = tuple(strokes)
+        if len(stroke_pairs) < 2:
+            raise ValueError("multi_swipe() requires at least two strokes")
+
+        if any(
+            isinstance(point, NormalizedPoint)
+            for start, end in stroke_pairs
+            for point in (start, end)
+        ):
+            viewport = (await self.get_display_state()).viewport
+        else:
+            viewport = None
+
+        return tuple(
+            (_resolve_screen_point(start, viewport), _resolve_screen_point(end, viewport))
+            for start, end in stroke_pairs
+        )
+
+    async def _pinch(
+        self,
+        *,
+        center: ScreenPoint | None,
+        start_span: float,
+        end_span: float,
+        inner_span: float,
+        outer_span: float,
+        duration_ms: int,
+    ) -> None:
+        self._ensure_open()
+        _validate_pinch_parameters(
+            inner_span=inner_span,
+            outer_span=outer_span,
+            duration_ms=duration_ms,
+        )
+
+        display_state = await self.get_display_state()
+        center_point = _resolve_screen_point(
+            center or _DEFAULT_PINCH_CENTER,
+            display_state.viewport,
+        )
+        strokes = _build_pinch_strokes(
+            center=center_point,
+            display_size=display_state.size,
+            start_span=start_span,
+            end_span=end_span,
+        )
+        await self.multi_swipe(strokes, duration_ms=duration_ms)
+
 
 def _session_id(device_id: str) -> str:
     return f"adb:{device_id}:{uuid4().hex}"
@@ -462,6 +670,16 @@ def _resolve_normalized_display_point(x: float, y: float, viewport: Viewport) ->
     return viewport.map_point(NormalizedPoint(x=x, y=y))
 
 
+def _resolve_screen_point(point: ScreenPoint, viewport: Viewport | None) -> Point:
+    if isinstance(point, NormalizedPoint):
+        if viewport is None:
+            raise RuntimeError("normalized screen point requires a display viewport")
+        return viewport.map_point(point)
+    if not isinstance(point, Point):
+        raise TypeError("screen point must be a Point or NormalizedPoint")
+    return point
+
+
 def _build_tap_shell_command(point: Point, *, hold_ms: int) -> str:
     if hold_ms < 0:
         raise ValueError("hold_ms must be >= 0")
@@ -474,6 +692,40 @@ def _build_swipe_shell_command(start: Point, end: Point, *, duration_ms: int) ->
     if duration_ms <= 0:
         raise ValueError("duration_ms must be > 0")
     return f"input swipe {start.x} {start.y} {end.x} {end.y} {duration_ms}"
+
+
+def _validate_pinch_parameters(
+    *,
+    inner_span: float,
+    outer_span: float,
+    duration_ms: int,
+) -> None:
+    if duration_ms <= 0:
+        raise ValueError("duration_ms must be > 0")
+    if not 0.0 < inner_span < outer_span <= 1.0:
+        raise ValueError("pinch spans must satisfy 0.0 < inner_span < outer_span <= 1.0")
+
+
+def _build_pinch_strokes(
+    *,
+    center: Point,
+    display_size: Size,
+    start_span: float,
+    end_span: float,
+) -> tuple[tuple[Point, Point], tuple[Point, Point]]:
+    smaller_dimension = min(display_size.width, display_size.height)
+    start_offset = _round_span_offset(start_span, smaller_dimension)
+    end_offset = _round_span_offset(end_span, smaller_dimension)
+
+    left_start = Point(x=center.x - start_offset, y=center.y)
+    left_end = Point(x=center.x - end_offset, y=center.y)
+    right_start = Point(x=center.x + start_offset, y=center.y)
+    right_end = Point(x=center.x + end_offset, y=center.y)
+    return ((left_start, left_end), (right_start, right_end))
+
+
+def _round_span_offset(span: float, smaller_dimension: int) -> int:
+    return int(span * smaller_dimension / 2 + 0.5)
 
 
 def _build_key_shell_command(key: AndroidKey | str) -> str:

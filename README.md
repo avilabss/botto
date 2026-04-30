@@ -11,6 +11,7 @@ This repository now separates the reusable SDK from the future game bot app:
 - Implemented: shared data types plus ADB-backed device discovery,
   async sessions, screenshot capture, app lifecycle helpers, direct input
   execution with common `AndroidKey` enums, viewport-aware coordinate mapping,
+  best-effort ADB multi-swipe/pinch helpers,
   ROI-first template and ORB feature matching, OCR-ready vision helpers, and
   run-organized artifact output.
 - `botto` reference flows: list devices, inspect a live session, and capture a screenshot to a PNG file.
@@ -49,7 +50,7 @@ CLASH_PACKAGE = "com.supercell.clashofclans"
 
 
 async def main() -> None:
-    artifacts = ArtifactStore("botto-output")
+    artifacts = ArtifactStore(".botto-artifacts")
 
     backend = AdbDeviceBackend()
     async with await backend.open_session() as session:
@@ -67,12 +68,12 @@ asyncio.run(main())
 
 Each `ArtifactStore` instance writes all saves to one run directory, named like
 `YYYYMMDD-HHMMSS-xxxxxxxx` by default, such as
-`botto-output/<run>/images/clash-of-clans.png`. Construct a new store without a
-`run_name` to start a new default run. The run-local `manifest.jsonl` records
-artifact paths relative to the artifact root, including the run folder. See
-`quick_run.py` for the same launch/capture/save/close flow as a local learning
-harness, and `docs/android-game-automator-sdk.md` for template matching, ORB
-feature matching, OCR, and advanced API examples.
+`.botto-artifacts/<run>/images/clash-of-clans.png`. Construct a new store
+without a `run_name` to start a new default run. The run-local `manifest.jsonl`
+records artifact paths relative to the artifact root, including the run folder.
+See `quick_run.py` for the same launch/capture/save/close flow as a local
+learning harness, and `docs/android-game-automator-sdk.md` for template
+matching, ORB feature matching, OCR, and advanced API examples.
 
 ## Module layout
 
@@ -89,7 +90,13 @@ feature matching, OCR, and advanced API examples.
 - `python -m botto` shows the reference CLI help.
 - `python -m botto devices` lists adb devices through `AdbDeviceBackend`.
 - `python -m botto session --device <serial>` inspects a live session and current display metadata.
-- `python -m botto capture --device <serial>` captures a screenshot and saves it under `.botto-output/<run>/images/device-capture.png` by default.
+- `python -m botto capture --device <serial>` captures a screenshot and saves it under `.botto-artifacts/<run>/images/device-capture.png` by default.
+
+## ADB input note
+
+`AdbDeviceSession.multi_swipe(...)`, `pinch_in(...)`, and `pinch_out(...)` issue
+concurrent ADB `input swipe` commands as best-effort multi-touch. Plain ADB does
+not guarantee true multi-touch on every device or game.
 
 ## Entrypoint
 
