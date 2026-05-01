@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from collections.abc import Iterable, Mapping
 from os import PathLike
 from pathlib import Path
 
 from android_game_automator.image import FrameImage
-from android_game_automator.types import Match, NormalizedPoint, Rect, ScreenRect
+from android_game_automator.types import Match, NormalizedPoint, PixelFormat, Rect, ScreenRect, Size
 from botto.screen_detector import analyze_screen
 from botto.screens import BaseScreen, Overlay, ScreenAnalysis
-from PIL import Image
 
 
 def test_analyze_screen_detects_loading_from_ocr() -> None:
@@ -36,16 +36,21 @@ def test_analyze_screen_detects_loading_from_ocr() -> None:
 
 
 def test_analyze_screen_detects_supercell_logo_from_template() -> None:
+    matcher = FakeTemplateMatcher({"supercell_logo.png": 0.95})
+
     analysis = analyze_screen(
         _frame(),
         read_text_fn=FakeTextReader(""),
-        find_template_fn=FakeTemplateMatcher({"supercell_logo.png": 0.95}),
+        find_template_fn=matcher,
     )
 
     assert analysis.base_screen == BaseScreen.SUPERCELL_LOGO
     assert analysis.overlay == Overlay.NONE
     assert analysis.confidence == 0.95
     assert _evidence_labels(analysis) == {"supercell_logo"}
+    assert len(matcher.calls) == 1
+    assert matcher.calls[0][0] == "supercell_logo.png"
+    assert matcher.calls[0][3] == (1.0,)
 
 
 def test_analyze_screen_detects_home_village_from_anchor_templates() -> None:
@@ -73,6 +78,47 @@ def test_analyze_screen_detects_home_village_from_anchor_templates() -> None:
         "shop_button.png",
     ]
     assert len(reader.calls) == 1
+
+
+def test_analyze_screen_passes_reference_scales_to_home_templates() -> None:
+    matcher = FakeTemplateMatcher(
+        {
+            "attack_button.png": 0.91,
+            "shop_button.png": 0.89,
+        }
+    )
+
+    analyze_screen(
+        _frame(width=1080, height=504),
+        read_text_fn=FakeTextReader(""),
+        find_template_fn=matcher,
+    )
+
+    scale_calls = _home_scale_calls(matcher)
+    assert scale_calls == {
+        "attack_button.png": (0.95, 1.0, 1.05),
+        "shop_button.png": (0.95, 1.0, 1.05),
+    }
+    for scales in scale_calls.values():
+        _assert_valid_scale_candidates(scales, expected_center=1.0)
+
+
+def test_analyze_screen_passes_full_resolution_scales_to_home_templates() -> None:
+    matcher = FakeTemplateMatcher({})
+    expected_scale = ((3088 / 1080) + (1440 / 504)) / 2.0
+
+    analyze_screen(
+        _frame(width=3088, height=1440),
+        read_text_fn=FakeTextReader("", ""),
+        find_template_fn=matcher,
+    )
+
+    scale_calls = _home_scale_calls(matcher)
+    assert set(scale_calls) == {"attack_button.png", "shop_button.png"}
+    for scales in scale_calls.values():
+        _assert_valid_scale_candidates(scales, expected_center=expected_scale)
+        assert math.isclose(scales[1], expected_scale, rel_tol=1e-12)
+        assert math.isclose(scales[1], 2.86, rel_tol=0.01)
 
 
 def test_analyze_screen_detects_connection_lost_without_try_again_and_short_circuits() -> None:
@@ -149,12 +195,31 @@ def test_analyze_screen_returns_unknown_without_known_evidence() -> None:
     assert analysis.recommended_action is None
 
 
-def _frame() -> FrameImage:
-    return FrameImage.from_pil_image(Image.new("RGBA", (16, 16), (0, 0, 0, 255)))
+def _frame(*, width: int = 16, height: int = 16) -> FrameImage:
+    return FrameImage(
+        size=Size(width=width, height=height),
+        pixel_format=PixelFormat.RGBA32,
+        data=bytes((0, 0, 0, 255)) * (width * height),
+    )
 
 
 def _evidence_labels(analysis: ScreenAnalysis) -> set[str]:
     return {evidence.label for evidence in analysis.evidence}
+
+
+def _home_scale_calls(matcher: FakeTemplateMatcher) -> dict[str, tuple[float, ...]]:
+    return {
+        template_name: scales
+        for template_name, _region, _min_confidence, scales in matcher.calls
+        if template_name in {"attack_button.png", "shop_button.png"}
+    }
+
+
+def _assert_valid_scale_candidates(scales: tuple[float, ...], *, expected_center: float) -> None:
+    assert 1 <= len(scales) <= 3
+    assert len(scales) == len(set(scales))
+    assert all(math.isfinite(scale) and scale > 0.0 for scale in scales)
+    assert any(math.isclose(scale, expected_center, rel_tol=1e-12) for scale in scales)
 
 
 class FakeTextReader:
@@ -172,7 +237,7 @@ class FakeTextReader:
 class FakeTemplateMatcher:
     def __init__(self, matches: Mapping[str, float]) -> None:
         self._matches = dict(matches)
-        self.calls: list[tuple[str, ScreenRect | None, float]] = []
+        self.calls: list[tuple[str, ScreenRect | None, float, tuple[float, ...]]] = []
 
     def __call__(
         self,
@@ -181,15 +246,17 @@ class FakeTemplateMatcher:
         *,
         region: ScreenRect | None = None,
         min_confidence: float = 0.9,
+        scales: Iterable[float] = (1.0,),
     ) -> Match | None:
         template_name = Path(template).name
-        self.calls.append((template_name, region, min_confidence))
+        resolved_scales = tuple(scales)
+        self.calls.append((template_name, region, min_confidence, resolved_scales))
         confidence = self._matches.get(template_name)
         if confidence is None or confidence < min_confidence:
             return None
         return Match(
             bounds=Rect(left=1, top=2, width=3, height=4),
             confidence=confidence,
-            scale=1.0,
+            scale=resolved_scales[0],
             rotation=0.0,
         )
