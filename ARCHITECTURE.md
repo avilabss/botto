@@ -31,26 +31,29 @@ path.
 - `botto.runtime` — read-only runtime loop: ADB session setup, optional app
   launch, scrcpy latest-frame polling, throttled background analysis, and
   `RuntimeLoopState` delivery to a sink.
-- `botto.live` — debug viewer/sink over `botto.runtime`: OpenCV preview,
+- `botto.live` — debug preview/sink over `botto.runtime`: OpenCV preview,
   overlay rendering, save/exit hotkeys, and artifact persistence.
 
-Current live-debug flow:
+Current runtime flow:
 
-1. `botto debug` prepares the live debug viewer and enters `botto.live`.
-2. `botto.live` calls `botto.runtime.run_read_only_runtime` with a UI sink.
+1. `botto run` enters `botto.runtime.run_read_only_runtime` with a headless
+   state-log sink; `botto run --debug` enters `botto.live` with a debug preview
+   UI sink.
+2. The selected sink consumes `RuntimeLoopState` snapshots from the runtime.
 3. `botto.runtime` opens the ADB session, launches Clash unless
    `--skip-launch` is passed, starts `ScrcpyFrameSource`, and tracks the latest
    frame.
 4. `botto.runtime` runs `botto.detection.analyze_screen` on throttled frames and
    delivers `RuntimeLoopState` snapshots to the sink.
-5. `botto.live` renders annotations and handles save/exit hotkeys.
+5. `botto.live` renders debug preview annotations and handles save/exit hotkeys.
 
 ## Commands and checks
 
 Supported CLI commands:
 
 - `botto devices`
-- `botto debug [--serial/--device] [--skip-launch]`
+- `botto run [--serial/--device] [--skip-launch]`
+- `botto run --debug [--serial/--device] [--skip-launch]`
 
 Project checks:
 

@@ -1,4 +1,4 @@
-"""Live-debug overlay rendering helpers."""
+"""Debug overlay rendering helpers."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from botto.detection import Overlay, ScreenAnalysis
 from .window import BgrArray, frame_image_to_bgr_array
 
 if TYPE_CHECKING:
-    from botto.live.debug import LiveAnalysisSnapshot
+    from botto.live.debug_preview import DebugPreviewAnalysisSnapshot
 
 type BgrColor = tuple[int, int, int]
 
@@ -42,7 +42,7 @@ _LINE_THICKNESS = 2
 
 def render_debug_overlay(
     frame: FrameImage,
-    snapshot: LiveAnalysisSnapshot | None,
+    snapshot: DebugPreviewAnalysisSnapshot | None,
     *,
     now: float | None = None,
     analysis_running: bool = False,
@@ -83,7 +83,7 @@ def render_debug_overlay(
 
 
 def _debug_status_lines(
-    snapshot: LiveAnalysisSnapshot | None,
+    snapshot: DebugPreviewAnalysisSnapshot | None,
     *,
     now: float | None,
     analysis_running: bool = False,

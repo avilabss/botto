@@ -1,4 +1,4 @@
-"""Live-debug hotkey artifact save helpers."""
+"""Debug preview hotkey artifact save helpers."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from android_game_automator.types import SessionInfo
 
 if TYPE_CHECKING:
     from botto.detection import ScreenAnalysis
-    from botto.live.debug import LiveAnalysisSnapshot
+    from botto.live.debug_preview import DebugPreviewAnalysisSnapshot
 
 _SAVE_RAW_KEY_CODE = ord("s")
 _SAVE_DEBUG_KEY_CODE = ord("d")
@@ -23,14 +23,14 @@ _SAVE_STATUS_SECONDS = 3.0
 
 
 @dataclass(frozen=True, slots=True)
-class _SavedLiveDebugArtifacts:
+class _SavedDebugPreviewArtifacts:
     kind: str
     label: str
     image_path: Path
     analysis_path: Path | None = None
 
 
-def _live_debug_artifact_selection(key_code: int) -> tuple[str, str] | None:
+def _debug_preview_artifact_selection(key_code: int) -> tuple[str, str] | None:
     if key_code == _SAVE_RAW_KEY_CODE:
         return "raw", "s"
     if key_code == _SAVE_DEBUG_KEY_CODE:
@@ -38,22 +38,22 @@ def _live_debug_artifact_selection(key_code: int) -> tuple[str, str] | None:
     return None
 
 
-def _live_debug_artifact_label(*, kind: str, sequence: int) -> str:
-    return f"live-debug-{kind}-{sequence:06d}"
+def _debug_preview_artifact_label(*, kind: str, sequence: int) -> str:
+    return f"debug-preview-{kind}-{sequence:06d}"
 
 
-def _save_live_debug_artifacts(
+def _save_debug_preview_artifacts(
     *,
     store: ArtifactStore,
     label: str,
     kind: str,
     hotkey: str,
     image: FrameImage,
-    snapshot: LiveAnalysisSnapshot | None,
+    snapshot: DebugPreviewAnalysisSnapshot | None,
     session_info: SessionInfo,
     package_name: str,
     launched: bool,
-) -> _SavedLiveDebugArtifacts:
+) -> _SavedDebugPreviewArtifacts:
     metadata = {
         "artifact_label": label,
         "device_id": session_info.device.identity.device_id,
@@ -72,7 +72,7 @@ def _save_live_debug_artifacts(
     if snapshot is not None:
         analysis_path = store.save_json(
             label,
-            _live_debug_analysis_payload(
+            _debug_preview_analysis_payload(
                 snapshot=snapshot,
                 saved_frame=image,
                 session_info=session_info,
@@ -86,7 +86,7 @@ def _save_live_debug_artifacts(
                 "analysis_frame_id": snapshot.frame_id,
             },
         )
-    return _SavedLiveDebugArtifacts(
+    return _SavedDebugPreviewArtifacts(
         kind=kind,
         label=label,
         image_path=image_path,
@@ -94,9 +94,9 @@ def _save_live_debug_artifacts(
     )
 
 
-def _live_debug_analysis_payload(
+def _debug_preview_analysis_payload(
     *,
-    snapshot: LiveAnalysisSnapshot,
+    snapshot: DebugPreviewAnalysisSnapshot,
     saved_frame: FrameImage,
     session_info: SessionInfo,
     package_name: str,
@@ -162,13 +162,13 @@ def _jsonable(value: object) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def _live_debug_overlay_save_message(saved: _SavedLiveDebugArtifacts) -> str:
+def _debug_preview_overlay_save_message(saved: _SavedDebugPreviewArtifacts) -> str:
     analysis_suffix = " + analysis" if saved.analysis_path is not None else ""
     return f"saved {saved.kind}: {saved.label}{analysis_suffix}"
 
 
-def _live_debug_stdout_save_message(saved: _SavedLiveDebugArtifacts) -> str:
+def _debug_preview_stdout_save_message(saved: _SavedDebugPreviewArtifacts) -> str:
     parts = [f"image={saved.image_path}"]
     if saved.analysis_path is not None:
         parts.append(f"analysis={saved.analysis_path}")
-    return f"saved live-debug {saved.kind} artifact {saved.label}: " + ", ".join(parts)
+    return f"saved debug-preview {saved.kind} artifact {saved.label}: " + ", ".join(parts)

@@ -4,8 +4,8 @@ Botto is a scrcpy-first Clash of Clans debug/detection app plus a small reusable
 Python SDK for Android device sessions, live frames, image analysis, OCR, and
 debug artifacts.
 
-- `botto` lists connected ADB devices and runs a read-only live debug view for
-  Clash of Clans.
+- `botto` lists connected ADB devices, runs a headless read-only Clash runtime,
+  and can open a debug preview when requested.
 - `android_game_automator` provides reusable SDK primitives: typed geometry and
   device models, `FrameImage`, scrcpy frame streaming, ROI-first vision/OCR
   helpers, artifact storage, and minimal ADB session/app lifecycle helpers.
@@ -20,7 +20,7 @@ Implemented today:
 - Read-only Clash screen and overlay analysis in `botto.detection`.
 - Read-only latest-frame runtime loop in `botto.runtime` with throttled
   analysis.
-- Live debug UI in `botto.live` as a viewer/sink over runtime, with overlays
+- Debug preview UI in `botto.live` as a viewer/sink over runtime, with overlays
   and artifact hotkeys.
 
 Botto does not currently implement gameplay automation.
@@ -93,18 +93,20 @@ Each `ArtifactStore` writes to one run directory, named like
   display state, and app lifecycle helpers.
 - `botto.detection` — read-only Clash detectors, models, and templates.
 - `botto.runtime` — read-only latest-frame loop with throttled screen analysis.
-- `botto.live` — debug UI/sink over `botto.runtime`: overlay rendering,
+- `botto.live` — debug preview UI/sink over `botto.runtime`: overlay rendering,
   preview window, and artifact hotkeys.
 - `botto.cli` — CLI parser and command dispatch.
 
 ## CLI
 
 - `botto devices` — list usable ADB devices.
-- `botto debug [--serial SERIAL|--device SERIAL] [--skip-launch]` — open the
-  live debug viewer over the read-only runtime loop. By default it launches
-  Clash first; `--skip-launch` debugs the current screen.
+- `botto run [--serial SERIAL|--device SERIAL] [--skip-launch]` — run the
+  read-only runtime headlessly with concise state-change logs.
+- `botto run --debug [--serial SERIAL|--device SERIAL] [--skip-launch]` — open
+  the debug preview over the read-only runtime loop. By default runtime
+  modes launch Clash first; `--skip-launch` uses the current screen.
 
-Live debug hotkeys:
+Debug preview hotkeys:
 
 - `s` — save the current raw frame and latest analysis JSON when available.
 - `d` — save the current debug/annotated frame and latest analysis JSON when

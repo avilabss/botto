@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ from .config import (
 from .state import RuntimeAnalysisSnapshot, RuntimeLoopState
 
 type RuntimeClock = Callable[[], float]
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RuntimeScreenAnalyzer(Protocol):
@@ -106,6 +110,7 @@ async def run_read_only_runtime(
     )
     analyzer = screen_analyzer if screen_analyzer is not None else analyze_screen
 
+    _LOGGER.debug("Opening runtime session for device %s", device_id or "default")
     session = await resolved_backend.open_session(device_id)
     source: RuntimeFrameSource | None = None
     latest_snapshot: RuntimeAnalysisSnapshot | None = None
@@ -125,10 +130,12 @@ async def run_read_only_runtime(
 
     try:
         if launch:
+            _LOGGER.debug("Launching package %s", package_name)
             await session.launch_app(package_name)
 
         serial = session.info.device.identity.device_id
         source = resolved_source_factory(serial=serial, max_fps=max_fps)
+        _LOGGER.debug("Starting frame source for device %s", serial)
         source.start()
 
         while True:
@@ -161,20 +168,26 @@ async def run_read_only_runtime(
                 _analysis_snapshot_refresher=complete_pending_analysis_if_ready,
             )
             if not sink(state):
+                _LOGGER.debug("Runtime sink requested stop")
                 break
             await asyncio.sleep(0)
     finally:
         try:
             if source is not None:
+                _LOGGER.debug("Stopping frame source")
                 source.stop()
         finally:
             try:
+                _LOGGER.debug("Closing runtime session")
                 await session.close()
             finally:
                 try:
+                    if pending_analysis is not None:
+                        _LOGGER.debug("Waiting for pending runtime analysis")
                     await _finish_pending_runtime_analysis(pending_analysis)
                 finally:
                     analysis_executor.shutdown(wait=True, cancel_futures=True)
+                    _LOGGER.debug("Runtime cleanup complete")
 
 
 def _start_runtime_analysis(

@@ -1,14 +1,17 @@
-"""CLI and renderer tests for the read-only live debug command."""
+"""CLI and renderer tests for the read-only debug preview."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import threading
 from io import StringIO
 from pathlib import Path
 
 import botto.cli as cli_module
+import botto.live as live_module
 import botto.live.overlay as overlay_module
 import pytest
 from android_game_automator.image import FrameImage
@@ -32,40 +35,72 @@ from botto.detection import (
     RecommendedAction,
     ScreenAnalysis,
 )
-from botto.live import LiveAnalysisSnapshot, render_debug_overlay, run_live_debug
+from botto.live import (
+    DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE,
+    DebugPreviewAnalysisSnapshot,
+    render_debug_overlay,
+    run_debug_preview,
+)
 from PIL import Image
 
 from tests.botto.fakes import (
     FakeAdbBackend,
     FakeAdbSession,
-    FakeLiveSource,
-    FakeLiveSourceFactory,
+    FakeFrameSource,
+    FakeFrameSourceFactory,
     FakePreviewWindow,
     make_frame,
 )
 
+_CONSOLE_LOG_RE = re.compile(r"^\d{2}:\d{2}:\d{2} \| (?P<message>.*)$")
+_ARTIFACT_LOG_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \| "
+    r"(?P<level>[A-Z]+) \| (?P<logger>[A-Za-z0-9_.]+) \| (?P<message>.*)$"
+)
 
-def test_debug_launches_default_package_and_starts_scrcpy_source(
+
+def test_live_package_exports_debug_preview_api() -> None:
+    exported = set(live_module.__all__)
+
+    assert DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE == "Botto debug preview"
+
+    assert {
+        "DEFAULT_DEBUG_PREVIEW_ANALYZE_EVERY_SECONDS",
+        "DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE",
+        "DebugPreviewAnalysisSnapshot",
+        "DebugPreviewBackend",
+        "DebugPreviewFrameSource",
+        "DebugPreviewFrameSourceFactory",
+        "DebugPreviewScreenAnalyzer",
+        "DebugPreviewSession",
+        "run_debug_preview",
+    } <= exported
+
+
+def test_run_debug_preview_launches_default_package_and_starts_scrcpy_source(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     stdout = StringIO()
     stderr = StringIO()
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(frames=(make_frame("frame-1"),))
-    source_factory = FakeLiveSourceFactory(source)
+    source = FakeFrameSource(frames=(make_frame("frame-1"),))
+    source_factory = FakeFrameSourceFactory(source)
     preview = FakePreviewWindow(keys=(ord("q"),))
     analyzer = FakeAnalyzer()
 
     exit_code = run(
         [
-            "debug",
+            "run",
+            "--debug",
             "--device",
             "emulator-5554",
         ],
         backend_factory=lambda: backend,
-        live_source_factory=source_factory,
+        frame_source_factory=source_factory,
         preview_window=preview,
         screen_analyzer=analyzer,
         stdout=stdout,
@@ -74,7 +109,10 @@ def test_debug_launches_default_package_and_starts_scrcpy_source(
 
     assert exit_code == 0
     assert stdout.getvalue() == ""
-    assert stderr.getvalue() == ""
+    assert _console_messages(stderr.getvalue()) == [
+        "Starting debug preview",
+        "Debug preview exit requested",
+    ]
     assert backend.opened_device_ids == ["emulator-5554"]
     assert session.launched_packages == ["com.supercell.clashofclans"]
     assert source_factory.created == [("emulator-5554", DEFAULT_SCRCPY_MAX_FPS)]
@@ -82,30 +120,35 @@ def test_debug_launches_default_package_and_starts_scrcpy_source(
     assert source.start_calls == 1
     assert source.stop_calls == 1
     assert session.closed is True
-    assert preview.opened == ["Botto live debug"]
-    assert preview.closed == ["Botto live debug"]
+    assert preview.opened == [DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE]
+    assert preview.closed == [DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE]
     assert [frame.frame_id for frame in preview.shown_frames] == ["frame-1"]
 
 
-def test_debug_skip_launch_keeps_current_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_debug_preview_skip_launch_keeps_current_screen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     stdout = StringIO()
     stderr = StringIO()
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(frames=(make_frame("frame-1"),))
-    source_factory = FakeLiveSourceFactory(source)
+    source = FakeFrameSource(frames=(make_frame("frame-1"),))
+    source_factory = FakeFrameSourceFactory(source)
     preview = FakePreviewWindow(keys=(27,))
 
     exit_code = run(
         [
-            "debug",
+            "run",
+            "--debug",
             "--serial",
             "emulator-5554",
             "--skip-launch",
         ],
         backend_factory=lambda: backend,
-        live_source_factory=source_factory,
+        frame_source_factory=source_factory,
         preview_window=preview,
         screen_analyzer=FakeAnalyzer(),
         stdout=stdout,
@@ -113,16 +156,72 @@ def test_debug_skip_launch_keeps_current_screen(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert exit_code == 0
-    assert stderr.getvalue() == ""
+    assert _console_messages(stderr.getvalue()) == [
+        "Starting debug preview",
+        "Debug preview exit requested",
+    ]
     assert backend.opened_device_ids == ["emulator-5554"]
     assert session.launched_packages == []
     assert source_factory.created == [("emulator-5554", DEFAULT_SCRCPY_MAX_FPS)]
-    assert preview.opened == ["Botto live debug"]
-    assert preview.closed == ["Botto live debug"]
+    assert preview.opened == [DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE]
+    assert preview.closed == [DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE]
     assert len(preview.shown_frames) == 1
 
 
-def test_debug_warms_up_ocr_before_first_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_debug_preview_log_and_hotkey_artifacts_share_run_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
+    stdout = StringIO()
+    stderr = StringIO()
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
+    source = FakeFrameSource(frames=(make_frame("frame-1"), make_frame("frame-2")))
+    source_factory = FakeFrameSourceFactory(source)
+    analyzer = BlockingAnalyzer()
+    preview = FakePreviewWindow(keys=(ord("s"), ord("q")), wait_callbacks=(None, analyzer.release))
+
+    exit_code = run(
+        ["run", "--debug", "--device", "emulator-5554", "--skip-launch"],
+        backend_factory=lambda: backend,
+        frame_source_factory=source_factory,
+        preview_window=preview,
+        screen_analyzer=analyzer,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert stdout.getvalue() == ""
+    run_dirs = list((tmp_path / ".botto-artifacts").iterdir())
+    assert len(run_dirs) == 1
+    run_dir = run_dirs[0]
+    image_path = run_dir / "images" / "debug-preview-raw-000001.png"
+    log_path = run_dir / "text" / "run-log.txt"
+    assert image_path.is_file()
+    assert log_path.is_file()
+    logged_image_path = Path(".botto-artifacts") / run_dir.name / "images" / image_path.name
+    saved_message = (
+        f"saved debug-preview raw artifact debug-preview-raw-000001: image={logged_image_path}"
+    )
+    expected_messages = [
+        "Starting debug preview",
+        saved_message,
+        "Debug preview exit requested",
+    ]
+    assert _console_messages(stderr.getvalue()) == expected_messages
+    assert _artifact_log_records(log_path) == [
+        ("INFO", "botto.live.debug_preview", message) for message in expected_messages
+    ]
+
+
+def test_run_debug_preview_warms_up_ocr_before_first_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     events: list[str] = []
 
     def fake_warmup() -> None:
@@ -136,15 +235,15 @@ def test_debug_warms_up_ocr_before_first_analysis(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(cli_module, "warm_up_ocr", fake_warmup)
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(frames=(make_frame("frame-1"),))
-    source_factory = FakeLiveSourceFactory(source)
+    source = FakeFrameSource(frames=(make_frame("frame-1"),))
+    source_factory = FakeFrameSourceFactory(source)
     preview = FakePreviewWindow(keys=(ord("q"),))
     analyzer = RecordingAnalyzer()
 
     exit_code = run(
-        ["debug", "--device", "emulator-5554", "--skip-launch"],
+        ["run", "--debug", "--device", "emulator-5554", "--skip-launch"],
         backend_factory=lambda: backend,
-        live_source_factory=source_factory,
+        frame_source_factory=source_factory,
         preview_window=preview,
         screen_analyzer=analyzer,
     )
@@ -153,18 +252,18 @@ def test_debug_warms_up_ocr_before_first_analysis(monkeypatch: pytest.MonkeyPatc
     assert events == ["warmup", "analysis"]
 
 
-def test_live_debug_throttles_analysis_and_reuses_latest_result_between_frames() -> None:
+def test_debug_preview_throttles_analysis_and_reuses_latest_result_between_frames() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(
+    source = FakeFrameSource(
         frames=(make_frame("frame-1"), make_frame("frame-2"), make_frame("frame-3"))
     )
-    source_factory = FakeLiveSourceFactory(source)
+    source_factory = FakeFrameSourceFactory(source)
     preview = FakePreviewWindow(keys=(-1, -1, ord("q")))
     analyzer = FakeAnalyzer()
 
     asyncio.run(
-        run_live_debug(
+        run_debug_preview(
             device_id="emulator-5554",
             launch=False,
             analyze_every_seconds=1.0,
@@ -189,7 +288,7 @@ def test_live_debug_throttles_analysis_and_reuses_latest_result_between_frames()
 
 def passthrough_renderer(
     frame: FrameImage,
-    snapshot: LiveAnalysisSnapshot | None,
+    snapshot: DebugPreviewAnalysisSnapshot | None,
     *,
     now: float | None = None,
     analysis_running: bool = False,
@@ -198,13 +297,13 @@ def passthrough_renderer(
     return frame
 
 
-def test_live_debug_renders_newer_frames_while_slow_analysis_runs_single_flight() -> None:
+def test_debug_preview_renders_newer_frames_while_slow_analysis_runs_single_flight() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(
+    source = FakeFrameSource(
         frames=(make_frame("frame-1"), make_frame("frame-2"), make_frame("frame-3"))
     )
-    source_factory = FakeLiveSourceFactory(source)
+    source_factory = FakeFrameSourceFactory(source)
     analyzer = BlockingAnalyzer()
     preview = FakePreviewWindow(
         keys=(-1, -1, ord("q")),
@@ -213,7 +312,7 @@ def test_live_debug_renders_newer_frames_while_slow_analysis_runs_single_flight(
     renderer = CapturingRenderer()
 
     asyncio.run(
-        run_live_debug(
+        run_debug_preview(
             device_id="emulator-5554",
             launch=False,
             analyze_every_seconds=0.5,
@@ -237,19 +336,19 @@ def test_live_debug_renders_newer_frames_while_slow_analysis_runs_single_flight(
     assert [call.analysis_running for call in renderer.calls] == [True, True, True]
 
 
-def test_live_debug_uses_latest_frame_without_consuming_stale_frame_queue() -> None:
+def test_debug_preview_uses_latest_frame_without_consuming_stale_frame_queue() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(
+    source = FakeFrameSource(
         frames=(make_frame("queued-stale-frame"),),
         latest_frames=(make_frame("latest-frame"),),
         fail_on_frames=True,
     )
-    source_factory = FakeLiveSourceFactory(source)
+    source_factory = FakeFrameSourceFactory(source)
     preview = FakePreviewWindow(keys=(ord("q"),))
 
     asyncio.run(
-        run_live_debug(
+        run_debug_preview(
             device_id="emulator-5554",
             launch=False,
             backend=backend,
@@ -265,18 +364,20 @@ def test_live_debug_uses_latest_frame_without_consuming_stale_frame_queue() -> N
     assert source.frames_calls == 0
 
 
-def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
+def test_debug_preview_s_hotkey_saves_raw_frame_and_latest_analysis(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="botto.live.debug_preview")
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(
+    source = FakeFrameSource(
         frames=(
             make_frame("frame-1", rgba=(1, 2, 3, 255)),
             make_frame("frame-2", rgba=(40, 50, 60, 255)),
         )
     )
-    source_factory = FakeLiveSourceFactory(source)
+    source_factory = FakeFrameSourceFactory(source)
     analysis = ScreenAnalysis(
         base_screen=BaseScreen.HOME_VILLAGE,
         overlay=Overlay.NONE,
@@ -309,11 +410,11 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
     )
 
     asyncio.run(
-        run_live_debug(
+        run_debug_preview(
             device_id="emulator-5554",
             launch=False,
             artifact_root=tmp_path,
-            run_name="live-run",
+            run_name="debug-preview-run",
             backend=backend,
             source_factory=source_factory,
             preview_window=preview,
@@ -321,10 +422,16 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
         )
     )
 
-    image_path = tmp_path / "live-run" / "images" / "live-debug-raw-000001.png"
-    analysis_path = tmp_path / "live-run" / "json" / "live-debug-raw-000001.json"
+    image_path = tmp_path / "debug-preview-run" / "images" / "debug-preview-raw-000001.png"
+    analysis_path = tmp_path / "debug-preview-run" / "json" / "debug-preview-raw-000001.json"
     assert image_path.is_file()
     assert analysis_path.is_file()
+    assert [record.getMessage() for record in caplog.records] == [
+        "Starting debug preview",
+        f"saved debug-preview raw artifact debug-preview-raw-000001: "
+        f"image={image_path}, analysis={analysis_path}",
+        "Debug preview exit requested",
+    ]
     with Image.open(image_path) as saved_image:
         assert saved_image.getpixel((0, 0)) == (40, 50, 60, 255)
     payload = json.loads(analysis_path.read_text(encoding="utf-8"))
@@ -358,21 +465,21 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
     assert payload["frame"]["frame_id"] == "frame-2"
     manifest_entries = [
         json.loads(line)
-        for line in (tmp_path / "live-run" / "manifest.jsonl")
+        for line in (tmp_path / "debug-preview-run" / "manifest.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert {entry["run_name"] for entry in manifest_entries} == {"live-run"}
-    assert {entry["run_dir"] for entry in manifest_entries} == {"live-run"}
+    assert {entry["run_name"] for entry in manifest_entries} == {"debug-preview-run"}
+    assert {entry["run_dir"] for entry in manifest_entries} == {"debug-preview-run"}
 
 
-def test_live_debug_hotkey_harvests_analysis_completed_during_wait_before_save(
+def test_debug_preview_hotkey_harvests_analysis_completed_during_wait_before_save(
     tmp_path: Path,
 ) -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
-    source_factory = FakeLiveSourceFactory(source)
+    source = FakeFrameSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
+    source_factory = FakeFrameSourceFactory(source)
     analysis = ScreenAnalysis(
         base_screen=BaseScreen.HOME_VILLAGE,
         overlay=Overlay.NONE,
@@ -385,7 +492,7 @@ def test_live_debug_hotkey_harvests_analysis_completed_during_wait_before_save(
     )
 
     asyncio.run(
-        run_live_debug(
+        run_debug_preview(
             device_id="emulator-5554",
             launch=False,
             artifact_root=tmp_path,
@@ -398,7 +505,7 @@ def test_live_debug_hotkey_harvests_analysis_completed_during_wait_before_save(
         )
     )
 
-    analysis_path = tmp_path / "fresh-hotkey-run" / "json" / "live-debug-raw-000001.json"
+    analysis_path = tmp_path / "fresh-hotkey-run" / "json" / "debug-preview-raw-000001.json"
     assert analysis_path.is_file()
     payload = json.loads(analysis_path.read_text(encoding="utf-8"))
     assert payload["analysis"]["base_screen"] == "home_village"
@@ -406,19 +513,19 @@ def test_live_debug_hotkey_harvests_analysis_completed_during_wait_before_save(
     assert payload["frame"]["frame_id"] == "frame-1"
 
 
-def test_live_debug_d_hotkey_saves_annotated_frame_and_latest_analysis(
+def test_debug_preview_d_hotkey_saves_annotated_frame_and_latest_analysis(
     tmp_path: Path,
 ) -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(
+    source = FakeFrameSource(
         frames=(
             make_frame("frame-1", rgba=(1, 2, 3, 255)),
             make_frame("frame-2", rgba=(40, 50, 60, 255)),
             make_frame("frame-3", rgba=(70, 80, 90, 255)),
         )
     )
-    source_factory = FakeLiveSourceFactory(source)
+    source_factory = FakeFrameSourceFactory(source)
     analysis = ScreenAnalysis(
         base_screen=BaseScreen.UNKNOWN,
         overlay=Overlay.CONNECTION_LOST,
@@ -431,7 +538,7 @@ def test_live_debug_d_hotkey_saves_annotated_frame_and_latest_analysis(
     )
 
     asyncio.run(
-        run_live_debug(
+        run_debug_preview(
             device_id="emulator-5554",
             launch=False,
             artifact_root=tmp_path,
@@ -444,8 +551,8 @@ def test_live_debug_d_hotkey_saves_annotated_frame_and_latest_analysis(
         )
     )
 
-    image_path = tmp_path / "debug-run" / "images" / "live-debug-debug-000001.png"
-    analysis_path = tmp_path / "debug-run" / "json" / "live-debug-debug-000001.json"
+    image_path = tmp_path / "debug-run" / "images" / "debug-preview-debug-000001.png"
+    analysis_path = tmp_path / "debug-run" / "json" / "debug-preview-debug-000001.json"
     assert image_path.is_file()
     assert analysis_path.is_file()
     with Image.open(image_path) as saved_image:
@@ -463,13 +570,13 @@ def test_live_debug_d_hotkey_saves_annotated_frame_and_latest_analysis(
     assert not hasattr(session, "swipe")
 
 
-def test_live_debug_hotkey_skips_analysis_json_when_no_snapshot_exists(
+def test_debug_preview_hotkey_skips_analysis_json_when_no_snapshot_exists(
     tmp_path: Path,
 ) -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
-    source_factory = FakeLiveSourceFactory(source)
+    source = FakeFrameSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
+    source_factory = FakeFrameSourceFactory(source)
     analyzer = BlockingAnalyzer()
     preview = FakePreviewWindow(
         keys=(ord("s"), ord("q")),
@@ -477,7 +584,7 @@ def test_live_debug_hotkey_skips_analysis_json_when_no_snapshot_exists(
     )
 
     asyncio.run(
-        run_live_debug(
+        run_debug_preview(
             device_id="emulator-5554",
             launch=False,
             artifact_root=tmp_path,
@@ -490,7 +597,7 @@ def test_live_debug_hotkey_skips_analysis_json_when_no_snapshot_exists(
         )
     )
 
-    image_path = tmp_path / "no-analysis-run" / "images" / "live-debug-raw-000001.png"
+    image_path = tmp_path / "no-analysis-run" / "images" / "debug-preview-raw-000001.png"
     assert image_path.is_file()
     assert not (tmp_path / "no-analysis-run" / "json").exists()
     assert source.latest_frame_calls == 2
@@ -505,7 +612,7 @@ def test_debug_status_lines_indicate_analysis_running_with_timing() -> None:
         overlay=Overlay.NONE,
         confidence=0.0,
     )
-    snapshot = LiveAnalysisSnapshot(
+    snapshot = DebugPreviewAnalysisSnapshot(
         analysis=analysis,
         analyzed_at=1.0,
         duration_seconds=0.25,
@@ -569,7 +676,7 @@ def test_debug_overlay_renderer_annotates_copy_with_evidence_and_target() -> Non
 
     annotated = render_debug_overlay(
         frame,
-        LiveAnalysisSnapshot(
+        DebugPreviewAnalysisSnapshot(
             analysis=analysis,
             analyzed_at=1.0,
             duration_seconds=0.05,
@@ -589,15 +696,17 @@ def test_debug_overlay_renderer_annotates_copy_with_evidence_and_target() -> Non
 
 
 @pytest.mark.parametrize("exit_key", [ord("q"), 27])
-def test_live_debug_exits_on_q_or_escape_cleans_up_background_work_and_remains_read_only(
+def test_debug_preview_exits_on_q_or_escape_cleans_up_background_work_and_remains_read_only(
     exit_key: int,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(frames=(make_frame("1"), make_frame("2"), make_frame("3")))
-    source_factory = FakeLiveSourceFactory(source)
+    source = FakeFrameSource(frames=(make_frame("1"), make_frame("2"), make_frame("3")))
+    source_factory = FakeFrameSourceFactory(source)
     analysis = ScreenAnalysis(
         base_screen=BaseScreen.UNKNOWN,
         overlay=Overlay.ANYONE_THERE,
@@ -616,9 +725,9 @@ def test_live_debug_exits_on_q_or_escape_cleans_up_background_work_and_remains_r
     )
 
     exit_code = run(
-        ["debug", "--device", "emulator-5554", "--skip-launch"],
+        ["run", "--debug", "--device", "emulator-5554", "--skip-launch"],
         backend_factory=lambda: backend,
-        live_source_factory=source_factory,
+        frame_source_factory=source_factory,
         preview_window=preview,
         screen_analyzer=analyzer,
     )
@@ -632,6 +741,24 @@ def test_live_debug_exits_on_q_or_escape_cleans_up_background_work_and_remains_r
     assert analyzer.finished.is_set()
     assert source.stop_calls == 1
     assert session.closed is True
+
+
+def _console_messages(log_text: str) -> list[str]:
+    messages: list[str] = []
+    for line in log_text.splitlines():
+        match = _CONSOLE_LOG_RE.fullmatch(line)
+        assert match is not None
+        messages.append(match.group("message"))
+    return messages
+
+
+def _artifact_log_records(log_path: Path) -> list[tuple[str, str, str]]:
+    records: list[tuple[str, str, str]] = []
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        match = _ARTIFACT_LOG_RE.fullmatch(line)
+        assert match is not None
+        records.append((match.group("level"), match.group("logger"), match.group("message")))
+    return records
 
 
 class FakeAnalyzer:
@@ -713,7 +840,7 @@ class CapturingRenderer:
     def __call__(
         self,
         frame: FrameImage,
-        snapshot: LiveAnalysisSnapshot | None,
+        snapshot: DebugPreviewAnalysisSnapshot | None,
         *,
         now: float | None = None,
         analysis_running: bool = False,
@@ -730,7 +857,7 @@ class SolidDebugRenderer:
     def __call__(
         self,
         frame: FrameImage,
-        snapshot: LiveAnalysisSnapshot | None,
+        snapshot: DebugPreviewAnalysisSnapshot | None,
         *,
         now: float | None = None,
         analysis_running: bool = False,

@@ -28,10 +28,15 @@ def test_botto_module_entrypoint_help() -> None:
     )
 
     assert completed.returncode == 0
+    assert "{devices,run}" in completed.stdout
     assert "devices" in completed.stdout
-    assert "debug" in completed.stdout
-    assert "live-preview" not in completed.stdout
-    assert "live-debug" not in completed.stdout
+    assert "run" in completed.stdout
+    assert "Examples:" in completed.stdout
+    assert "botto devices --json" in completed.stdout
+    assert "botto run --debug" in completed.stdout
+    assert "botto run --serial <serial> -v" in completed.stdout
+    assert "botto run --skip-launch --debug" in completed.stdout
+    assert "botto run --help" in completed.stdout
 
 
 def test_botto_module_entrypoint_version() -> None:

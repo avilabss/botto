@@ -51,7 +51,7 @@ def make_device_info(
 class FakeAdbSession:
     def __init__(self, *, device_id: str) -> None:
         self._info = SessionInfo(
-            session_id=f"adb:{device_id}:live-debug",
+            session_id=f"adb:{device_id}:debug-preview",
             device=make_device_info(device_id),
             started_at=datetime.now(UTC),
             metadata={"adb.target_kind": "emulator"},
@@ -101,7 +101,7 @@ class FakeAdbBackend:
         return (session.info.device,)
 
 
-class FakeLiveSource:
+class FakeFrameSource:
     def __init__(
         self,
         *,
@@ -135,16 +135,16 @@ class FakeLiveSource:
     def frames(self) -> Iterator[FrameImage]:
         self.frames_calls += 1
         if self._fail_on_frames:
-            raise AssertionError("live-debug must not consume queued frames for display")
+            raise AssertionError("debug preview must not consume queued frames for display")
         yield from self._frames
 
 
-class FakeLiveSourceFactory:
-    def __init__(self, source: FakeLiveSource) -> None:
+class FakeFrameSourceFactory:
+    def __init__(self, source: FakeFrameSource) -> None:
         self._source = source
         self.created: list[tuple[str, int]] = []
 
-    def __call__(self, *, serial: str, max_fps: int) -> FakeLiveSource:
+    def __call__(self, *, serial: str, max_fps: int) -> FakeFrameSource:
         self.created.append((serial, max_fps))
         return self._source
 

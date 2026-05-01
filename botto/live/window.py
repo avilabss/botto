@@ -47,7 +47,7 @@ def frame_image_to_bgr_array(frame: FrameImage) -> BgrArray:
     """Convert SDK RGBA32 frame data into BGR pixels for ``cv2.imshow``."""
 
     if frame.pixel_format is not PixelFormat.RGBA32:
-        raise ValueError("live preview expects RGBA32 FrameImage data")
+        raise ValueError("debug preview expects RGBA32 FrameImage data")
 
     rgba = np.frombuffer(frame.data, dtype=np.uint8).reshape((frame.height, frame.width, 4))
     bgr = np.empty((frame.height, frame.width, 3), dtype=np.uint8)

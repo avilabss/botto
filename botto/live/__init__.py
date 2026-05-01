@@ -1,18 +1,18 @@
-"""Read-only scrcpy live debug flows for Botto."""
+"""Read-only scrcpy debug preview flow for Botto."""
 
 from __future__ import annotations
 
-from botto.live.debug import (
-    DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS,
-    DEFAULT_LIVE_DEBUG_WINDOW_TITLE,
+from botto.live.debug_preview import (
+    DEFAULT_DEBUG_PREVIEW_ANALYZE_EVERY_SECONDS,
+    DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE,
     DebugOverlayRenderer,
-    LiveAnalysisSnapshot,
-    LiveDebugBackend,
-    LiveDebugFrameSource,
-    LiveDebugFrameSourceFactory,
-    LiveDebugSession,
-    LiveScreenAnalyzer,
-    run_live_debug,
+    DebugPreviewAnalysisSnapshot,
+    DebugPreviewBackend,
+    DebugPreviewFrameSource,
+    DebugPreviewFrameSourceFactory,
+    DebugPreviewScreenAnalyzer,
+    DebugPreviewSession,
+    run_debug_preview,
 )
 from botto.live.overlay import render_debug_overlay
 from botto.live.window import (
@@ -23,19 +23,19 @@ from botto.live.window import (
 )
 
 __all__ = [
-    "DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS",
-    "DEFAULT_LIVE_DEBUG_WINDOW_TITLE",
+    "DEFAULT_DEBUG_PREVIEW_ANALYZE_EVERY_SECONDS",
+    "DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE",
     "DebugOverlayRenderer",
+    "DebugPreviewAnalysisSnapshot",
+    "DebugPreviewBackend",
+    "DebugPreviewFrameSource",
+    "DebugPreviewFrameSourceFactory",
+    "DebugPreviewScreenAnalyzer",
+    "DebugPreviewSession",
     "EXIT_KEY_CODES",
-    "LiveAnalysisSnapshot",
-    "LiveDebugBackend",
-    "LiveDebugFrameSource",
-    "LiveDebugFrameSourceFactory",
-    "LiveDebugSession",
-    "LiveScreenAnalyzer",
     "OpenCvPreviewWindow",
     "PreviewWindow",
     "frame_image_to_bgr_array",
     "render_debug_overlay",
-    "run_live_debug",
+    "run_debug_preview",
 ]

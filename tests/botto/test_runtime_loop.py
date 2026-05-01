@@ -17,8 +17,8 @@ from botto.runtime import (
 from tests.botto.fakes import (
     FakeAdbBackend,
     FakeAdbSession,
-    FakeLiveSource,
-    FakeLiveSourceFactory,
+    FakeFrameSource,
+    FakeFrameSourceFactory,
     make_frame,
 )
 
@@ -26,10 +26,10 @@ from tests.botto.fakes import (
 def test_runtime_delivers_newer_frames_while_slow_analysis_runs() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(
+    source = FakeFrameSource(
         frames=(make_frame("frame-1"), make_frame("frame-2"), make_frame("frame-3"))
     )
-    source_factory = FakeLiveSourceFactory(source)
+    source_factory = FakeFrameSourceFactory(source)
     analyzer = BlockingAnalyzer()
     delivered_frame_ids: list[str | None] = []
     analysis_running: list[bool] = []
@@ -68,7 +68,7 @@ def test_runtime_delivers_newer_frames_while_slow_analysis_runs() -> None:
 def test_runtime_analyzer_is_single_flight_with_no_queued_jobs() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(
+    source = FakeFrameSource(
         frames=(
             make_frame("frame-1"),
             make_frame("frame-2"),
@@ -77,7 +77,7 @@ def test_runtime_analyzer_is_single_flight_with_no_queued_jobs() -> None:
             make_frame("frame-5"),
         )
     )
-    source_factory = FakeLiveSourceFactory(source)
+    source_factory = FakeFrameSourceFactory(source)
     analyzer = BlockingAnalyzer()
     delivered_frame_ids: list[str | None] = []
 
@@ -114,8 +114,8 @@ def test_runtime_analyzer_is_single_flight_with_no_queued_jobs() -> None:
 def test_runtime_exit_callback_stops_source_closes_session_and_waits_for_analysis() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
-    source = FakeLiveSource(frames=(make_frame("frame-1"), make_frame("frame-2")))
-    source_factory = FakeLiveSourceFactory(source)
+    source = FakeFrameSource(frames=(make_frame("frame-1"), make_frame("frame-2")))
+    source_factory = FakeFrameSourceFactory(source)
     analyzer = BlockingAnalyzer()
 
     def sink(state: RuntimeLoopState) -> bool:
