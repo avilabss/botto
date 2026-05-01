@@ -206,9 +206,7 @@ def test_open_session_without_device_id_requires_exactly_one_usable_device() -> 
         client=FakeAdbClient(device_list_payload="offline-serial\toffline\n")
     )
     multiple_backend = AdbDeviceBackend(
-        client=FakeAdbClient(
-            device_list_payload="emulator-5554\tdevice\nemulator-5556\tdevice\n"
-        )
+        client=FakeAdbClient(device_list_payload="emulator-5554\tdevice\nemulator-5556\tdevice\n")
     )
 
     with pytest.raises(AdbDeviceUnavailableError, match="No usable ADB devices"):
@@ -219,9 +217,7 @@ def test_open_session_without_device_id_requires_exactly_one_usable_device() -> 
 
 def test_open_session_rejects_invalid_or_unusable_device() -> None:
     backend = AdbDeviceBackend(
-        client=FakeAdbClient(
-            devices={"R58M123ABC": FakeAdbDevice("R58M123ABC", state="offline")}
-        )
+        client=FakeAdbClient(devices={"R58M123ABC": FakeAdbDevice("R58M123ABC", state="offline")})
     )
 
     with pytest.raises(ValueError, match="device_id"):

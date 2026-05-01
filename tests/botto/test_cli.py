@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import StringIO
 
+import botto.cli as cli_module
 import pytest
 from botto.cli import build_parser, run
 
@@ -77,3 +78,20 @@ def test_devices_json_output_includes_sdk_metadata() -> None:
     assert '"device_id": "emulator-5554"' in stdout.getvalue()
     assert '"adb.target_kind": "emulator"' in stdout.getvalue()
     assert '"adb.android_sdk": "34"' in stdout.getvalue()
+
+
+def test_devices_does_not_warm_up_ocr(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_warmup() -> None:
+        raise AssertionError("devices must not initialize OCR")
+
+    monkeypatch.setattr(cli_module, "warm_up_ocr", fail_warmup)
+    stdout = StringIO()
+
+    exit_code = run(
+        ["devices"],
+        backend_factory=lambda: FakeAdbBackend(devices=(make_device_info("emulator-5554"),)),
+        stdout=stdout,
+    )
+
+    assert exit_code == 0
+    assert "emulator-5554" in stdout.getvalue()

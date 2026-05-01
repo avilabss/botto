@@ -7,6 +7,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 from PIL import Image, ImageOps
 
 from android_game_automator.image import FrameImage, rect_to_normalized, resolve_region
@@ -63,6 +64,12 @@ def read_text_blocks(
     )
 
 
+def warm_up_ocr() -> None:
+    """Initialize the shared RapidOCR recognizer before the first OCR read."""
+
+    _get_rapidocr_recognizer()
+
+
 def preprocess_ocr_region(
     image: FrameImage,
     config: OcrPreprocessConfig | None = None,
@@ -106,9 +113,8 @@ def _map_text_block_bounds(
 
 
 def _recognize_text_blocks(image: FrameImage) -> tuple[TextBlock, ...]:
-    numpy = _require_numpy()
     recognizer = _get_rapidocr_recognizer()
-    payload = _frame_image_to_rgb_numpy_array(image, numpy)
+    payload = _frame_image_to_rgb_numpy_array(image)
     raw_result = recognizer(payload)
 
     blocks: list[TextBlock] = []
@@ -119,12 +125,12 @@ def _recognize_text_blocks(image: FrameImage) -> tuple[TextBlock, ...]:
     return tuple(blocks)
 
 
-def _frame_image_to_rgb_numpy_array(image: FrameImage, numpy: Any) -> Any:
+def _frame_image_to_rgb_numpy_array(image: FrameImage) -> Any:
     source = image.to_pil_image()
     try:
         rgb = source.convert("RGB")
         try:
-            return numpy.array(rgb)
+            return np.array(rgb)
         finally:
             rgb.close()
     finally:
@@ -153,16 +159,6 @@ def _create_rapidocr_recognizer() -> Any:
         raise RuntimeError(
             "OCR requires RapidOCR; failed to initialize 'rapidocr-onnxruntime'"
         ) from exc
-
-
-def _require_numpy() -> Any:
-    try:
-        import numpy
-    except ImportError as exc:
-        raise RuntimeError(
-            "OCR requires RapidOCR and NumPy; install 'rapidocr-onnxruntime' to use read_text"
-        ) from exc
-    return numpy
 
 
 def _rapidocr_entries(raw_result: Any) -> Iterable[Any]:
@@ -275,4 +271,5 @@ __all__ = [
     "preprocess_ocr_region",
     "read_text",
     "read_text_blocks",
+    "warm_up_ocr",
 ]

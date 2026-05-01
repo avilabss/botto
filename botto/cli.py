@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from importlib import metadata
 from typing import Any, Protocol, TextIO
 
+from android_game_automator.ocr import warm_up_ocr
 from android_game_automator.types import DeviceInfo
 
 from android_game_automator.adb import AdbDeviceBackend
@@ -141,6 +142,7 @@ async def _run_command(
         return 0
 
     if args.command == "debug":
+        warm_up_ocr()
         try:
             await run_live_debug(
                 device_id=args.device,

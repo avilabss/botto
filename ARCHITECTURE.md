@@ -26,19 +26,24 @@ path.
 ## Botto app packages
 
 - `botto.cli` — stdlib `argparse` entrypoint for the current commands.
-- `botto.detection` — read-only Clash screen and overlay analysis built on SDK
-  image, vision, OCR, and template helpers.
-- `botto.live` — live debug orchestration: ADB session setup, scrcpy frame
-  source wiring, throttled analysis, OpenCV preview, overlay rendering, and
-  artifact hotkeys.
+- `botto.detection` — read-only Clash detectors, models, and templates built on
+  SDK image, vision, OCR, and template helpers.
+- `botto.runtime` — read-only runtime loop: ADB session setup, optional app
+  launch, scrcpy latest-frame polling, throttled background analysis, and
+  `RuntimeLoopState` delivery to a sink.
+- `botto.live` — debug viewer/sink over `botto.runtime`: OpenCV preview,
+  overlay rendering, save/exit hotkeys, and artifact persistence.
 
 Current live-debug flow:
 
-1. `botto debug` resolves an ADB device and launches Clash unless
-   `--skip-launch` is passed.
-2. `ScrcpyFrameSource` streams live frames for that device serial.
-3. `botto.detection.analyze_screen` runs periodically on recent frames.
-4. `botto.live` renders annotations and handles save/exit hotkeys.
+1. `botto debug` prepares the live debug viewer and enters `botto.live`.
+2. `botto.live` calls `botto.runtime.run_read_only_runtime` with a UI sink.
+3. `botto.runtime` opens the ADB session, launches Clash unless
+   `--skip-launch` is passed, starts `ScrcpyFrameSource`, and tracks the latest
+   frame.
+4. `botto.runtime` runs `botto.detection.analyze_screen` on throttled frames and
+   delivers `RuntimeLoopState` snapshots to the sink.
+5. `botto.live` renders annotations and handles save/exit hotkeys.
 
 ## Commands and checks
 
@@ -58,5 +63,6 @@ and `tests/botto/`) with `tests/test_*.py` naming.
 
 ## Boundaries
 
-Botto currently provides read-only debugging and detection. It does not include a
-gameplay bot loop.
+Botto currently provides read-only debugging and detection. The runtime loop
+emits frame and analysis state to sinks; it does not tap, swipe, perform
+gameplay recovery, or run gameplay automation.

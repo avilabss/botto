@@ -8,9 +8,9 @@ from pathlib import Path
 from android_game_automator.types import Size
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "assets" / "templates"
-SUPERCELL_LOGO_TEMPLATE = TEMPLATE_DIR / "supercell_logo.png"
-ATTACK_BUTTON_TEMPLATE = TEMPLATE_DIR / "attack_button.png"
-SHOP_BUTTON_TEMPLATE = TEMPLATE_DIR / "shop_button.png"
+SUPERCELL_LOGO_TEMPLATE = TEMPLATE_DIR / "screens" / "supercell" / "logo.png"
+ATTACK_BUTTON_TEMPLATE = TEMPLATE_DIR / "screens" / "home" / "attack_button.png"
+SHOP_BUTTON_TEMPLATE = TEMPLATE_DIR / "screens" / "home" / "shop_button.png"
 
 HOME_TEMPLATE_REFERENCE_SIZE = Size(width=1080, height=504)
 HOME_TEMPLATE_SCALE_MULTIPLIERS = (0.95, 1.0, 1.05)

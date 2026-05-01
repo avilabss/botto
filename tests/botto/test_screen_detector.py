@@ -11,8 +11,13 @@ from android_game_automator.image import FrameImage
 from android_game_automator.types import Match, NormalizedPoint, Rect, ScreenRect
 from botto.detection.detector import analyze_screen
 from botto.detection.models import BaseScreen, Overlay, ScreenAnalysis
+from botto.detection.templates import TEMPLATE_DIR
 
 from tests.botto.fakes import make_frame
+
+_SUPERCELL_LOGO_TEMPLATE = "screens/supercell/logo.png"
+_ATTACK_BUTTON_TEMPLATE = "screens/home/attack_button.png"
+_SHOP_BUTTON_TEMPLATE = "screens/home/shop_button.png"
 
 
 def test_analyze_screen_detects_loading_from_ocr() -> None:
@@ -30,15 +35,15 @@ def test_analyze_screen_detects_loading_from_ocr() -> None:
     assert analysis.recommended_action is None
     assert _evidence_labels(analysis) == {"loading_text"}
     assert [call[0] for call in matcher.calls] == [
-        "supercell_logo.png",
-        "attack_button.png",
-        "shop_button.png",
+        _SUPERCELL_LOGO_TEMPLATE,
+        _ATTACK_BUTTON_TEMPLATE,
+        _SHOP_BUTTON_TEMPLATE,
     ]
     assert len(reader.calls) == 2
 
 
 def test_analyze_screen_detects_supercell_logo_from_template() -> None:
-    matcher = FakeTemplateMatcher({"supercell_logo.png": 0.95})
+    matcher = FakeTemplateMatcher({_SUPERCELL_LOGO_TEMPLATE: 0.95})
 
     analysis = analyze_screen(
         _frame(),
@@ -50,8 +55,9 @@ def test_analyze_screen_detects_supercell_logo_from_template() -> None:
     assert analysis.overlay == Overlay.NONE
     assert analysis.confidence == 0.95
     assert _evidence_labels(analysis) == {"supercell_logo"}
+    assert analysis.evidence[0].details["template"] == "supercell_logo.png"
     assert len(matcher.calls) == 1
-    assert matcher.calls[0][0] == "supercell_logo.png"
+    assert matcher.calls[0][0] == _SUPERCELL_LOGO_TEMPLATE
     assert matcher.calls[0][3] == (1.0,)
 
 
@@ -59,8 +65,8 @@ def test_analyze_screen_detects_home_village_from_anchor_templates() -> None:
     reader = FakeTextReader("")
     matcher = FakeTemplateMatcher(
         {
-            "attack_button.png": 0.91,
-            "shop_button.png": 0.89,
+            _ATTACK_BUTTON_TEMPLATE: 0.91,
+            _SHOP_BUTTON_TEMPLATE: 0.89,
         }
     )
 
@@ -75,9 +81,9 @@ def test_analyze_screen_detects_home_village_from_anchor_templates() -> None:
     assert analysis.confidence == 0.90
     assert _evidence_labels(analysis) == {"attack_button", "shop_button"}
     assert [call[0] for call in matcher.calls] == [
-        "supercell_logo.png",
-        "attack_button.png",
-        "shop_button.png",
+        _SUPERCELL_LOGO_TEMPLATE,
+        _ATTACK_BUTTON_TEMPLATE,
+        _SHOP_BUTTON_TEMPLATE,
     ]
     assert len(reader.calls) == 1
 
@@ -85,8 +91,8 @@ def test_analyze_screen_detects_home_village_from_anchor_templates() -> None:
 def test_analyze_screen_passes_reference_scales_to_home_templates() -> None:
     matcher = FakeTemplateMatcher(
         {
-            "attack_button.png": 0.91,
-            "shop_button.png": 0.89,
+            _ATTACK_BUTTON_TEMPLATE: 0.91,
+            _SHOP_BUTTON_TEMPLATE: 0.89,
         }
     )
 
@@ -98,8 +104,8 @@ def test_analyze_screen_passes_reference_scales_to_home_templates() -> None:
 
     scale_calls = _home_scale_calls(matcher)
     assert scale_calls == {
-        "attack_button.png": (0.95, 1.0, 1.05),
-        "shop_button.png": (0.95, 1.0, 1.05),
+        _ATTACK_BUTTON_TEMPLATE: (0.95, 1.0, 1.05),
+        _SHOP_BUTTON_TEMPLATE: (0.95, 1.0, 1.05),
     }
     for scales in scale_calls.values():
         _assert_valid_scale_candidates(scales, expected_center=1.0)
@@ -116,7 +122,7 @@ def test_analyze_screen_passes_full_resolution_scales_to_home_templates() -> Non
     )
 
     scale_calls = _home_scale_calls(matcher)
-    assert set(scale_calls) == {"attack_button.png", "shop_button.png"}
+    assert set(scale_calls) == {_ATTACK_BUTTON_TEMPLATE, _SHOP_BUTTON_TEMPLATE}
     for scales in scale_calls.values():
         _assert_valid_scale_candidates(scales, expected_center=expected_scale)
         assert math.isclose(scales[1], expected_scale, rel_tol=1e-12)
@@ -127,8 +133,8 @@ def test_analyze_screen_detects_connection_lost_without_try_again_and_short_circ
     reader = FakeTextReader("Connection lost\nPlease check your internet connection.")
     matcher = FakeTemplateMatcher(
         {
-            "attack_button.png": 0.91,
-            "shop_button.png": 0.89,
+            _ATTACK_BUTTON_TEMPLATE: 0.91,
+            _SHOP_BUTTON_TEMPLATE: 0.89,
         }
     )
 
@@ -209,7 +215,7 @@ def _home_scale_calls(matcher: FakeTemplateMatcher) -> dict[str, tuple[float, ..
     return {
         template_name: scales
         for template_name, _region, _min_confidence, scales in matcher.calls
-        if template_name in {"attack_button.png", "shop_button.png"}
+        if template_name in {_ATTACK_BUTTON_TEMPLATE, _SHOP_BUTTON_TEMPLATE}
     }
 
 
@@ -246,7 +252,7 @@ class FakeTemplateMatcher:
         min_confidence: float = 0.9,
         scales: Iterable[float] = (1.0,),
     ) -> Match | None:
-        template_name = Path(template).name
+        template_name = _template_name(template)
         resolved_scales = tuple(scales)
         self.calls.append((template_name, region, min_confidence, resolved_scales))
         confidence = self._matches.get(template_name)
@@ -258,3 +264,11 @@ class FakeTemplateMatcher:
             scale=resolved_scales[0],
             rotation=0.0,
         )
+
+
+def _template_name(template: str | PathLike[str]) -> str:
+    template_path = Path(template)
+    try:
+        return template_path.relative_to(TEMPLATE_DIR).as_posix()
+    except ValueError:
+        return template_path.name

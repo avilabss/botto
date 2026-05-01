@@ -54,15 +54,19 @@ def _save_live_debug_artifacts(
     package_name: str,
     launched: bool,
 ) -> _SavedLiveDebugArtifacts:
-    metadata = _live_debug_artifact_metadata(
-        label=label,
-        kind=kind,
-        hotkey=hotkey,
-        image=image,
-        session_info=session_info,
-        package_name=package_name,
-        launched=launched,
-    )
+    metadata = {
+        "artifact_label": label,
+        "device_id": session_info.device.identity.device_id,
+        "frame_id": image.frame_id,
+        "height": image.size.height,
+        "hotkey": hotkey,
+        "image_kind": kind,
+        "launched": launched,
+        "package": package_name,
+        "pixel_format": image.pixel_format.value,
+        "session_id": session_info.session_id,
+        "width": image.size.width,
+    }
     image_path = store.save_image(label, image, metadata=metadata)
     analysis_path: Path | None = None
     if snapshot is not None:
@@ -90,31 +94,6 @@ def _save_live_debug_artifacts(
     )
 
 
-def _live_debug_artifact_metadata(
-    *,
-    label: str,
-    kind: str,
-    hotkey: str,
-    image: FrameImage,
-    session_info: SessionInfo,
-    package_name: str,
-    launched: bool,
-) -> dict[str, Any]:
-    return {
-        "artifact_label": label,
-        "device_id": session_info.device.identity.device_id,
-        "frame_id": image.frame_id,
-        "height": image.size.height,
-        "hotkey": hotkey,
-        "image_kind": kind,
-        "launched": launched,
-        "package": package_name,
-        "pixel_format": image.pixel_format.value,
-        "session_id": session_info.session_id,
-        "width": image.size.width,
-    }
-
-
 def _live_debug_analysis_payload(
     *,
     snapshot: LiveAnalysisSnapshot,
@@ -132,7 +111,17 @@ def _live_debug_analysis_payload(
         "artifact_label": artifact_label,
         "device_id": session_info.device.identity.device_id,
         "duration_seconds": snapshot.duration_seconds,
-        "frame": _serialize_live_debug_frame(saved_frame),
+        "frame": {
+            "captured_at": (
+                saved_frame.captured_at.isoformat() if saved_frame.captured_at is not None else None
+            ),
+            "frame_id": saved_frame.frame_id,
+            "pixel_format": saved_frame.pixel_format.value,
+            "size": {
+                "height": saved_frame.size.height,
+                "width": saved_frame.size.width,
+            },
+        },
         "image_kind": image_kind,
         "launched": launched,
         "package": package_name,
@@ -171,18 +160,6 @@ def _jsonable(value: object) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return [_jsonable(item) for item in value]
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
-
-
-def _serialize_live_debug_frame(image: FrameImage) -> dict[str, Any]:
-    return {
-        "captured_at": image.captured_at.isoformat() if image.captured_at is not None else None,
-        "frame_id": image.frame_id,
-        "pixel_format": image.pixel_format.value,
-        "size": {
-            "height": image.size.height,
-            "width": image.size.width,
-        },
-    }
 
 
 def _live_debug_overlay_save_message(saved: _SavedLiveDebugArtifacts) -> str:

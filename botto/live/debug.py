@@ -1,22 +1,29 @@
-"""Live scrcpy debug loop and background analysis coordination."""
+"""Live debug UI sink for the read-only runtime loop."""
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from collections.abc import Callable
 from os import PathLike
 from time import monotonic
 from typing import Protocol
 
 from android_game_automator.artifacts import ArtifactStore
 from android_game_automator.image import FrameImage
-from android_game_automator.scrcpy import DEFAULT_SCRCPY_MAX_FPS, ScrcpyFrameSource
 from android_game_automator.types import SessionInfo
 
-from android_game_automator.adb import AdbDeviceBackend
-from botto.detection import ScreenAnalysis, analyze_screen
+from botto.runtime import (
+    DEFAULT_CLASH_PACKAGE,
+    DEFAULT_RUNTIME_ANALYZE_EVERY_SECONDS,
+    DEFAULT_RUNTIME_MAX_FPS,
+    RuntimeAnalysisSnapshot,
+    RuntimeBackend,
+    RuntimeFrameSource,
+    RuntimeFrameSourceFactory,
+    RuntimeLoopState,
+    RuntimeScreenAnalyzer,
+    RuntimeSession,
+    run_read_only_runtime,
+)
 
 from .artifacts import (
     _SAVE_STATUS_SECONDS,
@@ -30,64 +37,19 @@ from .artifacts import (
 from .overlay import render_debug_overlay
 from .window import EXIT_KEY_CODES, OpenCvPreviewWindow, PreviewWindow
 
-DEFAULT_CLASH_PACKAGE = "com.supercell.clashofclans"
 DEFAULT_LIVE_DEBUG_WINDOW_TITLE = "Botto live debug"
-DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS = 1.0
+DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS = DEFAULT_RUNTIME_ANALYZE_EVERY_SECONDS
 DEFAULT_ARTIFACT_ROOT = ".botto-artifacts"
+
+LiveAnalysisSnapshot = RuntimeAnalysisSnapshot
+LiveDebugBackend = RuntimeBackend
+LiveDebugFrameSource = RuntimeFrameSource
+LiveDebugFrameSourceFactory = RuntimeFrameSourceFactory
+LiveDebugSession = RuntimeSession
+LiveScreenAnalyzer = RuntimeScreenAnalyzer
 
 type ClockFn = Callable[[], float]
 type StatusWriter = Callable[[str], None]
-
-
-class LiveScreenAnalyzer(Protocol):
-    """Callable used by live debug to analyze throttled frames."""
-
-    def __call__(self, image: FrameImage) -> ScreenAnalysis: ...
-
-
-class LiveDebugSession(Protocol):
-    """ADB session operations used by live debug."""
-
-    @property
-    def info(self) -> SessionInfo: ...
-
-    async def close(self) -> None: ...
-
-    async def launch_app(self, package_name: str) -> None: ...
-
-
-class LiveDebugBackend(Protocol):
-    """Backend operations used by live debug."""
-
-    async def open_session(self, device_id: str | None = None) -> LiveDebugSession: ...
-
-
-class LiveDebugFrameSource(Protocol):
-    """Read-only frame source operations used by live debug."""
-
-    def start(self) -> None: ...
-
-    def stop(self) -> None: ...
-
-    def latest_frame(self) -> FrameImage | None: ...
-
-    def frames(self) -> Iterator[FrameImage]: ...
-
-
-class LiveDebugFrameSourceFactory(Protocol):
-    """Factory for creating a source once the ADB device id is resolved."""
-
-    def __call__(self, *, serial: str, max_fps: int) -> LiveDebugFrameSource: ...
-
-
-@dataclass(frozen=True, slots=True)
-class LiveAnalysisSnapshot:
-    """Latest screen analysis plus timing metadata for overlay display."""
-
-    analysis: ScreenAnalysis
-    analyzed_at: float
-    duration_seconds: float | None = None
-    frame_id: str | None = None
 
 
 class DebugOverlayRenderer(Protocol):
@@ -103,19 +65,12 @@ class DebugOverlayRenderer(Protocol):
     ) -> FrameImage: ...
 
 
-@dataclass(frozen=True, slots=True)
-class _PendingLiveAnalysis:
-    future: asyncio.Future[ScreenAnalysis]
-    started_at: float
-    frame_id: str | None
-
-
 async def run_live_debug(
     *,
     device_id: str | None = None,
     package_name: str = DEFAULT_CLASH_PACKAGE,
     launch: bool = True,
-    max_fps: int = DEFAULT_SCRCPY_MAX_FPS,
+    max_fps: int = DEFAULT_RUNTIME_MAX_FPS,
     window_title: str = DEFAULT_LIVE_DEBUG_WINDOW_TITLE,
     analyze_every_seconds: float = DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS,
     artifact_root: str | PathLike[str] = DEFAULT_ARTIFACT_ROOT,
@@ -139,33 +94,24 @@ async def run_live_debug(
     if analyze_every_seconds <= 0:
         raise ValueError("analyze_every_seconds must be > 0")
 
-    resolved_backend = backend if backend is not None else AdbDeviceBackend()
-    resolved_source_factory = (
-        source_factory if source_factory is not None else _default_live_debug_frame_source_factory
-    )
     window = preview_window if preview_window is not None else OpenCvPreviewWindow()
-    analyzer = screen_analyzer if screen_analyzer is not None else analyze_screen
-
-    session = await resolved_backend.open_session(device_id)
-    source: LiveDebugFrameSource | None = None
     window_opened = False
-    latest_snapshot: LiveAnalysisSnapshot | None = None
-    last_analysis_started_at: float | None = None
-    pending_analysis: _PendingLiveAnalysis | None = None
     artifact_store: ArtifactStore | None = None
     artifact_sequence = 0
     save_status_message: str | None = None
     save_status_until = 0.0
-    analysis_executor = ThreadPoolExecutor(
-        max_workers=1,
-        thread_name_prefix="botto-live-debug-analysis",
-    )
 
-    def complete_pending_analysis_if_ready() -> None:
-        nonlocal latest_snapshot, pending_analysis
-        if pending_analysis is not None and pending_analysis.future.done():
-            latest_snapshot = _completed_live_analysis_snapshot(pending_analysis, clock=clock)
-            pending_analysis = None
+    def ensure_window_open() -> None:
+        nonlocal window_opened
+        if not window_opened:
+            window.open(window_title)
+            window_opened = True
+
+    def close_window_if_open() -> None:
+        nonlocal window_opened
+        if window_opened:
+            window.close(window_title)
+            window_opened = False
 
     def get_artifact_store() -> ArtifactStore:
         nonlocal artifact_store
@@ -178,6 +124,8 @@ async def run_live_debug(
         key_code: int,
         raw_frame: FrameImage,
         annotated_frame: FrameImage,
+        snapshot: LiveAnalysisSnapshot | None,
+        session_info: SessionInfo,
         now: float,
     ) -> _SavedLiveDebugArtifacts | None:
         nonlocal artifact_sequence, save_status_message, save_status_until
@@ -188,7 +136,6 @@ async def run_live_debug(
 
         kind, hotkey = selection
         image = raw_frame if kind == "raw" else annotated_frame
-        complete_pending_analysis_if_ready()
         artifact_sequence += 1
         label = _live_debug_artifact_label(kind=kind, sequence=artifact_sequence)
         saved = _save_live_debug_artifacts(
@@ -197,8 +144,8 @@ async def run_live_debug(
             kind=kind,
             hotkey=hotkey,
             image=image,
-            snapshot=latest_snapshot,
-            session_info=session.info,
+            snapshot=snapshot,
+            session_info=session_info,
             package_name=package_name,
             launched=launch,
         )
@@ -208,129 +155,70 @@ async def run_live_debug(
             status_writer(_live_debug_stdout_save_message(saved))
         return saved
 
-    try:
-        if launch:
-            await session.launch_app(package_name)
+    def handle_runtime_state(state: RuntimeLoopState) -> bool:
+        nonlocal save_status_message
 
-        serial = session.info.device.identity.device_id
-        source = resolved_source_factory(serial=serial, max_fps=max_fps)
-        source.start()
+        ensure_window_open()
+        frame_time = state.now
+        frame = state.frame
+        if frame is None:
+            if window.wait_key(1) in EXIT_KEY_CODES:
+                close_window_if_open()
+                return False
+            return True
 
-        window.open(window_title)
-        window_opened = True
-        while True:
-            complete_pending_analysis_if_ready()
-
-            frame = source.latest_frame()
-            frame_time = clock()
-            if frame is None:
-                if window.wait_key(1) in EXIT_KEY_CODES:
-                    break
-                await asyncio.sleep(0)
-                continue
-
-            if pending_analysis is None and (
-                last_analysis_started_at is None
-                or frame_time - last_analysis_started_at >= analyze_every_seconds
-            ):
-                last_analysis_started_at = frame_time
-                pending_analysis = _start_live_analysis(
-                    analyzer,
-                    frame,
-                    started_at=frame_time,
-                    executor=analysis_executor,
-                )
-
-            if save_status_message is not None and frame_time > save_status_until:
-                save_status_message = None
-            active_save_status = save_status_message
-            if overlay_renderer is None:
-                annotated_frame = render_debug_overlay(
-                    frame,
-                    latest_snapshot,
-                    now=frame_time,
-                    analysis_running=pending_analysis is not None,
-                    status_message=active_save_status,
-                )
-            else:
-                annotated_frame = overlay_renderer(
-                    frame,
-                    latest_snapshot,
-                    now=frame_time,
-                    analysis_running=pending_analysis is not None,
-                )
-            window.show(window_title, annotated_frame)
-            key_code = window.wait_key(1)
-            if key_code in EXIT_KEY_CODES:
-                break
-            save_artifacts_for_hotkey(
-                key_code=key_code,
-                raw_frame=frame,
-                annotated_frame=annotated_frame,
+        if save_status_message is not None and frame_time > save_status_until:
+            save_status_message = None
+        active_save_status = save_status_message
+        snapshot = state.analysis_snapshot
+        if overlay_renderer is None:
+            annotated_frame = render_debug_overlay(
+                frame,
+                snapshot,
                 now=frame_time,
+                analysis_running=state.analysis_running,
+                status_message=active_save_status,
             )
-            await asyncio.sleep(0)
+        else:
+            annotated_frame = overlay_renderer(
+                frame,
+                snapshot,
+                now=frame_time,
+                analysis_running=state.analysis_running,
+            )
+        window.show(window_title, annotated_frame)
+        key_code = window.wait_key(1)
+        if key_code in EXIT_KEY_CODES:
+            close_window_if_open()
+            return False
+        snapshot_for_save = snapshot
+        if _live_debug_artifact_selection(key_code) is not None:
+            snapshot_for_save = state.refresh_analysis_snapshot()
+        save_artifacts_for_hotkey(
+            key_code=key_code,
+            raw_frame=frame,
+            annotated_frame=annotated_frame,
+            snapshot=snapshot_for_save,
+            session_info=state.session_info,
+            now=frame_time,
+        )
+        return True
+
+    try:
+        await run_read_only_runtime(
+            sink=handle_runtime_state,
+            device_id=device_id,
+            package_name=package_name,
+            launch=launch,
+            max_fps=max_fps,
+            analyze_every_seconds=analyze_every_seconds,
+            backend=backend,
+            source_factory=source_factory,
+            screen_analyzer=screen_analyzer,
+            clock=clock,
+        )
     finally:
-        try:
-            if source is not None:
-                source.stop()
-        finally:
-            try:
-                if window_opened:
-                    window.close(window_title)
-            finally:
-                try:
-                    await session.close()
-                finally:
-                    try:
-                        await _finish_pending_live_analysis(pending_analysis)
-                    finally:
-                        analysis_executor.shutdown(wait=True, cancel_futures=True)
-
-
-def _start_live_analysis(
-    analyzer: LiveScreenAnalyzer,
-    frame: FrameImage,
-    *,
-    started_at: float,
-    executor: ThreadPoolExecutor,
-) -> _PendingLiveAnalysis:
-    loop = asyncio.get_running_loop()
-    return _PendingLiveAnalysis(
-        future=loop.run_in_executor(executor, analyzer, frame),
-        started_at=started_at,
-        frame_id=frame.frame_id,
-    )
-
-
-def _completed_live_analysis_snapshot(
-    pending: _PendingLiveAnalysis,
-    *,
-    clock: ClockFn,
-) -> LiveAnalysisSnapshot:
-    analysis = pending.future.result()
-    finished_at = clock()
-    return LiveAnalysisSnapshot(
-        analysis=analysis,
-        analyzed_at=finished_at,
-        duration_seconds=max(0.0, finished_at - pending.started_at),
-        frame_id=pending.frame_id,
-    )
-
-
-async def _finish_pending_live_analysis(pending: _PendingLiveAnalysis | None) -> None:
-    if pending is None:
-        return
-
-    await asyncio.shield(pending.future)
-
-
-def _default_live_debug_frame_source_factory(
-    *,
-    serial: str,
-    max_fps: int,
-) -> LiveDebugFrameSource:
-    return ScrcpyFrameSource(serial=serial, max_fps=max_fps)
+        close_window_if_open()
 
 
 __all__ = [

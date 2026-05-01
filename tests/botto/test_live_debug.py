@@ -8,6 +8,7 @@ import threading
 from io import StringIO
 from pathlib import Path
 
+import botto.cli as cli_module
 import botto.live.overlay as overlay_module
 import pytest
 from android_game_automator.image import FrameImage
@@ -34,7 +35,10 @@ from tests.botto.fakes import (
 )
 
 
-def test_debug_launches_default_package_and_starts_scrcpy_source() -> None:
+def test_debug_launches_default_package_and_starts_scrcpy_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     stdout = StringIO()
     stderr = StringIO()
     session = FakeAdbSession(device_id="emulator-5554")
@@ -73,7 +77,8 @@ def test_debug_launches_default_package_and_starts_scrcpy_source() -> None:
     assert [frame.frame_id for frame in preview.shown_frames] == ["frame-1"]
 
 
-def test_debug_skip_launch_keeps_current_screen() -> None:
+def test_debug_skip_launch_keeps_current_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     stdout = StringIO()
     stderr = StringIO()
     session = FakeAdbSession(device_id="emulator-5554")
@@ -105,6 +110,37 @@ def test_debug_skip_launch_keeps_current_screen() -> None:
     assert preview.opened == ["Botto live debug"]
     assert preview.closed == ["Botto live debug"]
     assert len(preview.shown_frames) == 1
+
+
+def test_debug_warms_up_ocr_before_first_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+
+    def fake_warmup() -> None:
+        events.append("warmup")
+
+    class RecordingAnalyzer(FakeAnalyzer):
+        def __call__(self, image: FrameImage) -> ScreenAnalysis:
+            events.append("analysis")
+            return super().__call__(image)
+
+    monkeypatch.setattr(cli_module, "warm_up_ocr", fake_warmup)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
+    source = FakeLiveSource(frames=(make_frame("frame-1"),))
+    source_factory = FakeLiveSourceFactory(source)
+    preview = FakePreviewWindow(keys=(ord("q"),))
+    analyzer = RecordingAnalyzer()
+
+    exit_code = run(
+        ["debug", "--device", "emulator-5554", "--skip-launch"],
+        backend_factory=lambda: backend,
+        live_source_factory=source_factory,
+        preview_window=preview,
+        screen_analyzer=analyzer,
+    )
+
+    assert exit_code == 0
+    assert events == ["warmup", "analysis"]
 
 
 def test_live_debug_throttles_analysis_and_reuses_latest_result_between_frames() -> None:
@@ -314,6 +350,46 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
     assert {entry["run_dir"] for entry in manifest_entries} == {"live-run"}
 
 
+def test_live_debug_hotkey_harvests_analysis_completed_during_wait_before_save(
+    tmp_path: Path,
+) -> None:
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
+    source = FakeLiveSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
+    source_factory = FakeLiveSourceFactory(source)
+    analysis = ScreenAnalysis(
+        base_screen=BaseScreen.HOME_VILLAGE,
+        overlay=Overlay.NONE,
+        confidence=0.8,
+    )
+    analyzer = BlockingAnalyzer(analysis)
+    preview = FakePreviewWindow(
+        keys=(ord("s"), ord("q")),
+        wait_callbacks=(analyzer.wait_until_started_release_and_finish,),
+    )
+
+    asyncio.run(
+        run_live_debug(
+            device_id="emulator-5554",
+            launch=False,
+            artifact_root=tmp_path,
+            run_name="fresh-hotkey-run",
+            backend=backend,
+            source_factory=source_factory,
+            preview_window=preview,
+            screen_analyzer=analyzer,
+            overlay_renderer=passthrough_renderer,
+        )
+    )
+
+    analysis_path = tmp_path / "fresh-hotkey-run" / "json" / "live-debug-raw-000001.json"
+    assert analysis_path.is_file()
+    payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert payload["analysis"]["base_screen"] == "home_village"
+    assert payload["analysis_frame_id"] == "frame-1"
+    assert payload["frame"]["frame_id"] == "frame-1"
+
+
 def test_live_debug_d_hotkey_saves_annotated_frame_and_latest_analysis(
     tmp_path: Path,
 ) -> None:
@@ -497,7 +573,9 @@ def test_debug_overlay_renderer_annotates_copy_with_evidence_and_target() -> Non
 @pytest.mark.parametrize("exit_key", [ord("q"), 27])
 def test_live_debug_exits_on_q_or_escape_cleans_up_background_work_and_remains_read_only(
     exit_key: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(frames=(make_frame("1"), make_frame("2"), make_frame("3")))

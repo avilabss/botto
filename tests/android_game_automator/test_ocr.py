@@ -12,11 +12,30 @@ from android_game_automator.ocr import (
     preprocess_ocr_region,
     read_text,
     read_text_blocks,
+    warm_up_ocr,
 )
 from android_game_automator.types import NormalizedRect, Rect, Size, TextBlock
 from PIL import Image
 
 _NO_PREPROCESS = OcrPreprocessConfig(scale=1, threshold=None)
+
+
+def test_warm_up_ocr_initializes_recognizer_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    recognizer = object()
+
+    def fake_create_recognizer() -> object:
+        calls.append("create")
+        return recognizer
+
+    monkeypatch.setattr(ocr_module, "_rapidocr_recognizer", None)
+    monkeypatch.setattr(ocr_module, "_create_rapidocr_recognizer", fake_create_recognizer)
+
+    warm_up_ocr()
+    warm_up_ocr()
+
+    assert calls == ["create"]
+    assert ocr_module._rapidocr_recognizer is recognizer
 
 
 def test_preprocess_ocr_region_scales_thresholds_and_inverts() -> None:

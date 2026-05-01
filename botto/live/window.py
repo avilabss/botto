@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+import cv2
 import numpy as np
 import numpy.typing as npt
 from android_game_automator.image import FrameImage
@@ -30,23 +31,15 @@ class OpenCvPreviewWindow:
     """Small OpenCV HighGUI adapter for displaying SDK ``FrameImage`` frames."""
 
     def open(self, window_title: str) -> None:
-        import cv2
-
         cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
 
     def show(self, window_title: str, frame: FrameImage) -> None:
-        import cv2
-
         cv2.imshow(window_title, frame_image_to_bgr_array(frame))
 
     def wait_key(self, delay_ms: int) -> int:
-        import cv2
-
         return int(cv2.waitKey(delay_ms) & 0xFF)
 
     def close(self, window_title: str) -> None:
-        import cv2
-
         cv2.destroyWindow(window_title)
 
 

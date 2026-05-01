@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from math import isfinite
 from typing import TYPE_CHECKING
 
+import cv2
 import numpy as np
 from android_game_automator.image import FrameImage
 from android_game_automator.types import (
@@ -123,8 +124,6 @@ def _debug_status_lines(
 
 
 def _draw_status_lines(bgr: BgrArray, lines: tuple[str, ...]) -> None:
-    import cv2
-
     if not lines:
         return
 
@@ -176,8 +175,6 @@ def _draw_evidence(
 
 
 def _draw_rect(bgr: BgrArray, rect: Rect, color: BgrColor) -> None:
-    import cv2
-
     cv2.rectangle(
         bgr,
         (rect.left, rect.top),
@@ -188,8 +185,6 @@ def _draw_rect(bgr: BgrArray, rect: Rect, color: BgrColor) -> None:
 
 
 def _draw_label(bgr: BgrArray, label: str, rect: Rect, color: BgrColor) -> None:
-    import cv2
-
     if not label:
         return
 
@@ -207,8 +202,6 @@ def _draw_label(bgr: BgrArray, label: str, rect: Rect, color: BgrColor) -> None:
 
 
 def _draw_recommended_action(bgr: BgrArray, size: Size, analysis: ScreenAnalysis) -> None:
-    import cv2
-
     action = analysis.recommended_action
     if action is None or action.tap_target is None:
         return

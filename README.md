@@ -17,9 +17,11 @@ Implemented today:
 - ADB-backed device discovery, async sessions, display state, and app
   launch/close lifecycle helpers.
 - scrcpy-backed live frame capture as `FrameImage` objects.
-- Read-only Clash screen detection in `botto.detection`.
-- Live debug display in `botto.live` with throttled detector annotations and
-  artifact hotkeys.
+- Read-only Clash screen and overlay analysis in `botto.detection`.
+- Read-only latest-frame runtime loop in `botto.runtime` with throttled
+  analysis.
+- Live debug UI in `botto.live` as a viewer/sink over runtime, with overlays
+  and artifact hotkeys.
 
 Botto does not currently implement gameplay automation.
 
@@ -89,17 +91,18 @@ Each `ArtifactStore` writes to one run directory, named like
 - `android_game_automator.artifacts` — local artifact persistence.
 - `android_game_automator.adb` — minimal ADB device discovery, sessions,
   display state, and app lifecycle helpers.
-- `botto.detection` — read-only Clash screen/overlay analysis.
-- `botto.live` — scrcpy live debug loop, overlay rendering, preview window, and
-  artifact hotkeys.
+- `botto.detection` — read-only Clash detectors, models, and templates.
+- `botto.runtime` — read-only latest-frame loop with throttled screen analysis.
+- `botto.live` — debug UI/sink over `botto.runtime`: overlay rendering,
+  preview window, and artifact hotkeys.
 - `botto.cli` — CLI parser and command dispatch.
 
 ## CLI
 
 - `botto devices` — list usable ADB devices.
 - `botto debug [--serial SERIAL|--device SERIAL] [--skip-launch]` — open the
-  scrcpy live debug view. By default it launches Clash first; `--skip-launch`
-  debugs the current screen.
+  live debug viewer over the read-only runtime loop. By default it launches
+  Clash first; `--skip-launch` debugs the current screen.
 
 Live debug hotkeys:
 
