@@ -6,7 +6,8 @@ from android_game_automator.image import FrameImage
 from android_game_automator.types import NormalizedRect
 
 from ..common import TextReader, contains_phrase
-from ..models import Evidence
+from ..evidence import Evidence, EvidenceKind
+from .models import BaseScreen, ScreenElement
 
 _LOADING_TEXT_REGION = NormalizedRect(left=0.28, top=0.70, width=0.44, height=0.20)
 _LOADING_CONFIDENCE = 0.8
@@ -24,8 +25,9 @@ def detect_loading_screen(
         return None
 
     return Evidence(
-        kind="ocr",
-        label="loading_text",
+        kind=EvidenceKind.OCR,
+        subject=BaseScreen.LOADING,
+        anchor=ScreenElement.LOADING_TEXT,
         confidence=_LOADING_CONFIDENCE,
         text=loading_text,
         details={"region": _LOADING_TEXT_REGION, "phrase": "Loading"},

@@ -6,8 +6,9 @@ from android_game_automator.image import FrameImage
 from android_game_automator.types import NormalizedRect
 
 from ..common import TemplateMatcher, template_evidence
-from ..models import Evidence
+from ..evidence import Evidence
 from ..templates import ATTACK_BUTTON_TEMPLATE, SHOP_BUTTON_TEMPLATE, home_template_scales
+from .models import BaseScreen, HomeElement
 
 _ATTACK_BUTTON_REGION = NormalizedRect(left=0.00, top=0.74, width=0.25, height=0.26)
 _SHOP_BUTTON_REGION = NormalizedRect(left=0.80, top=0.72, width=0.20, height=0.28)
@@ -28,7 +29,8 @@ def detect_home_village(
             template_evidence(
                 image,
                 template_path=ATTACK_BUTTON_TEMPLATE,
-                label="attack_button",
+                subject=BaseScreen.HOME_VILLAGE,
+                anchor=HomeElement.ATTACK_BUTTON,
                 region=_ATTACK_BUTTON_REGION,
                 min_confidence=_HOME_ANCHOR_CONFIDENCE,
                 find_template_fn=find_template_fn,
@@ -37,7 +39,8 @@ def detect_home_village(
             template_evidence(
                 image,
                 template_path=SHOP_BUTTON_TEMPLATE,
-                label="shop_button",
+                subject=BaseScreen.HOME_VILLAGE,
+                anchor=HomeElement.SHOP_BUTTON,
                 region=_SHOP_BUTTON_REGION,
                 min_confidence=_HOME_ANCHOR_CONFIDENCE,
                 find_template_fn=find_template_fn,

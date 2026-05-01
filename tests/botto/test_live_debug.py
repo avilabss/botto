@@ -21,7 +21,17 @@ from android_game_automator.types import (
     Rect,
 )
 from botto.cli import run
-from botto.detection.models import BaseScreen, Evidence, Overlay, RecommendedAction, ScreenAnalysis
+from botto.detection import (
+    ActionKind,
+    BaseScreen,
+    Evidence,
+    EvidenceKind,
+    HomeElement,
+    Overlay,
+    PopupButton,
+    RecommendedAction,
+    ScreenAnalysis,
+)
 from botto.live import LiveAnalysisSnapshot, render_debug_overlay, run_live_debug
 from PIL import Image
 
@@ -273,8 +283,9 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
         confidence=0.8,
         evidence=(
             Evidence(
-                kind="template",
-                label="attack_button",
+                kind=EvidenceKind.TEMPLATE,
+                subject=BaseScreen.HOME_VILLAGE,
+                anchor=HomeElement.ATTACK_BUTTON,
                 confidence=0.93,
                 details={
                     "bounds": Rect(left=1, top=2, width=3, height=4),
@@ -284,7 +295,9 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
             ),
         ),
         recommended_action=RecommendedAction(
-            label="tap_try_again",
+            kind=ActionKind.TAP,
+            target=PopupButton.TRY_AGAIN,
+            reason=Overlay.CONNECTION_LOST,
             tap_target=NormalizedPoint(x=0.5, y=0.88),
             details={"overlay": Overlay.CONNECTION_LOST},
         ),
@@ -322,8 +335,9 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
         "evidence": [
             {
                 "kind": "template",
-                "label": "attack_button",
+                "subject": "home_village",
                 "confidence": 0.93,
+                "anchor": "attack_button",
                 "text": None,
                 "details": {
                     "bounds": {"left": 1, "top": 2, "width": 3, "height": 4},
@@ -333,7 +347,9 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
             }
         ],
         "recommended_action": {
-            "label": "tap_try_again",
+            "kind": "tap",
+            "target": "try_again",
+            "reason": "connection_lost",
             "tap_target": {"x": 0.5, "y": 0.88},
             "details": {"overlay": "connection_lost"},
         },
@@ -533,8 +549,8 @@ def test_debug_overlay_renderer_annotates_copy_with_evidence_and_target() -> Non
         confidence=0.9,
         evidence=(
             Evidence(
-                kind="ocr",
-                label="modal.connection_lost",
+                kind=EvidenceKind.OCR,
+                subject=Overlay.CONNECTION_LOST,
                 confidence=0.9,
                 text="Connection lost",
                 details={
@@ -544,7 +560,9 @@ def test_debug_overlay_renderer_annotates_copy_with_evidence_and_target() -> Non
             ),
         ),
         recommended_action=RecommendedAction(
-            label="tap_try_again",
+            kind=ActionKind.TAP,
+            target=PopupButton.TRY_AGAIN,
+            reason=Overlay.CONNECTION_LOST,
             tap_target=NormalizedPoint(x=0.5, y=0.88),
         ),
     )
@@ -585,7 +603,9 @@ def test_live_debug_exits_on_q_or_escape_cleans_up_background_work_and_remains_r
         overlay=Overlay.ANYONE_THERE,
         confidence=0.9,
         recommended_action=RecommendedAction(
-            label="tap_reload_game",
+            kind=ActionKind.TAP,
+            target=PopupButton.RELOAD_GAME,
+            reason=Overlay.ANYONE_THERE,
             tap_target=NormalizedPoint(x=0.5, y=0.88),
         ),
     )

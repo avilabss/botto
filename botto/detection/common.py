@@ -11,8 +11,6 @@ from typing import Protocol
 from android_game_automator.image import FrameImage
 from android_game_automator.types import Match, NormalizedPoint, ScreenRect
 
-from .models import BaseScreen, Evidence, Overlay, RecommendedAction
-
 
 class TextReader(Protocol):
     """Callable shape used for OCR so tests can inject fakes."""
@@ -45,8 +43,7 @@ _OCR_CONFIDENCE = 0.9
 def blocking_overlay_result(
     overlay: Overlay,
     *,
-    evidence_label: str,
-    action_label: str,
+    target: PopupButton,
     text: str,
     phrases: tuple[str, ...],
     region: ScreenRect,
@@ -54,16 +51,17 @@ def blocking_overlay_result(
     """Build the shared evidence/action tuple for known blocking popups."""
 
     evidence = Evidence(
-        kind="ocr",
-        label=evidence_label,
+        kind=EvidenceKind.OCR,
+        subject=overlay,
         confidence=_OCR_CONFIDENCE,
         text=text,
         details={"region": region, "phrases": phrases},
     )
     action = RecommendedAction(
-        label=action_label,
+        kind=ActionKind.TAP,
+        target=target,
+        reason=overlay,
         tap_target=_BLOCKING_POPUP_BUTTON_TAP_TARGET,
-        details={"overlay": overlay.value},
     )
     return overlay, _OCR_CONFIDENCE, (evidence,), action
 
@@ -72,7 +70,8 @@ def template_evidence(
     image: FrameImage,
     *,
     template_path: Path,
-    label: str,
+    subject: EvidenceSubject,
+    anchor: EvidenceAnchor | None = None,
     region: ScreenRect,
     min_confidence: float,
     find_template_fn: TemplateMatcher,
@@ -100,8 +99,9 @@ def template_evidence(
         return None
 
     return Evidence(
-        kind="template",
-        label=label,
+        kind=EvidenceKind.TEMPLATE,
+        subject=subject,
+        anchor=anchor,
         confidence=match.confidence,
         details={
             "bounds": match.bounds,
@@ -142,6 +142,14 @@ def contains_phrase(text: str, phrase: str) -> bool:
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+
+
+# Bind detection model classes after helpers are defined so package-level
+# orchestration exports can import this module during package initialization.
+from .actions import ActionKind, RecommendedAction  # noqa: E402, I001
+from .evidence import Evidence, EvidenceAnchor, EvidenceKind, EvidenceSubject  # noqa: E402
+from .overlays.models import Overlay, PopupButton  # noqa: E402
+from .screens.models import BaseScreen  # noqa: E402
 
 
 __all__ = [

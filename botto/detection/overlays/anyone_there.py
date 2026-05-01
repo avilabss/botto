@@ -5,7 +5,7 @@ from __future__ import annotations
 from android_game_automator.types import ScreenRect
 
 from ..common import OverlayDetection, blocking_overlay_result, matching_phrases
-from ..models import Overlay
+from .models import Overlay, PopupButton
 
 
 def detect_anyone_there(text: str, *, region: ScreenRect) -> OverlayDetection | None:
@@ -23,8 +23,7 @@ def detect_anyone_there(text: str, *, region: ScreenRect) -> OverlayDetection | 
 
     return blocking_overlay_result(
         Overlay.ANYONE_THERE,
-        evidence_label="modal.anyone_there",
-        action_label="tap_reload_game",
+        target=PopupButton.RELOAD_GAME,
         text=text,
         phrases=phrases,
         region=region,

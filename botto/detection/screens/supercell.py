@@ -6,8 +6,9 @@ from android_game_automator.image import FrameImage
 from android_game_automator.types import NormalizedRect
 
 from ..common import TemplateMatcher, template_evidence
-from ..models import Evidence
+from ..evidence import Evidence
 from ..templates import SUPERCELL_LOGO_TEMPLATE
+from .models import BaseScreen, ScreenElement
 
 _SUPERCELL_LOGO_REGION = NormalizedRect(left=0.20, top=0.20, width=0.60, height=0.60)
 _SUPERCELL_TEMPLATE_CONFIDENCE = 0.88
@@ -23,7 +24,8 @@ def detect_supercell_logo(
     return template_evidence(
         image,
         template_path=SUPERCELL_LOGO_TEMPLATE,
-        label="supercell_logo",
+        subject=BaseScreen.SUPERCELL_LOGO,
+        anchor=ScreenElement.SUPERCELL_LOGO,
         region=_SUPERCELL_LOGO_REGION,
         min_confidence=_SUPERCELL_TEMPLATE_CONFIDENCE,
         find_template_fn=find_template_fn,

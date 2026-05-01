@@ -11,6 +11,8 @@ from typing import Protocol, Self
 
 import numpy as np
 import numpy.typing as npt
+from py_scrcpy_sdk import ScrcpyClient as _PyScrcpyClient  # type: ignore[import-untyped]
+from py_scrcpy_sdk import ScrcpyConfig as _PyScrcpyConfig  # type: ignore[import-untyped]
 
 from android_game_automator.image import FrameImage
 from android_game_automator.types import PixelFormat, Size
@@ -220,12 +222,8 @@ def frame_image_from_scrcpy_frame(
 
 
 def _create_client(config: ScrcpySourceConfig) -> ScrcpyClient:
-    # The PyPI distribution is named ``py-scrcpy-sdk`` and imports as ``py_scrcpy_sdk``.
-    from py_scrcpy_sdk import ScrcpyClient as PyScrcpyClient  # type: ignore[import-untyped]
-    from py_scrcpy_sdk import ScrcpyConfig  # type: ignore[import-untyped]
-
-    return PyScrcpyClient(
-        ScrcpyConfig(
+    return _PyScrcpyClient(
+        _PyScrcpyConfig(
             serial=config.serial,
             max_fps=config.max_fps,
         )

@@ -9,8 +9,17 @@ from pathlib import Path
 
 from android_game_automator.image import FrameImage
 from android_game_automator.types import Match, NormalizedPoint, Rect, ScreenRect
+from botto.detection import (
+    ActionKind,
+    BaseScreen,
+    EvidenceKind,
+    HomeElement,
+    Overlay,
+    PopupButton,
+    ScreenAnalysis,
+    ScreenElement,
+)
 from botto.detection.detector import analyze_screen
-from botto.detection.models import BaseScreen, Overlay, ScreenAnalysis
 from botto.detection.templates import TEMPLATE_DIR
 
 from tests.botto.fakes import make_frame
@@ -34,6 +43,9 @@ def test_analyze_screen_detects_loading_from_ocr() -> None:
     assert analysis.overlay == Overlay.NONE
     assert analysis.recommended_action is None
     assert _evidence_labels(analysis) == {"loading_text"}
+    assert analysis.evidence[0].kind is EvidenceKind.OCR
+    assert analysis.evidence[0].subject is BaseScreen.LOADING
+    assert analysis.evidence[0].anchor is ScreenElement.LOADING_TEXT
     assert [call[0] for call in matcher.calls] == [
         _SUPERCELL_LOGO_TEMPLATE,
         _ATTACK_BUTTON_TEMPLATE,
@@ -55,6 +67,9 @@ def test_analyze_screen_detects_supercell_logo_from_template() -> None:
     assert analysis.overlay == Overlay.NONE
     assert analysis.confidence == 0.95
     assert _evidence_labels(analysis) == {"supercell_logo"}
+    assert analysis.evidence[0].kind is EvidenceKind.TEMPLATE
+    assert analysis.evidence[0].subject is BaseScreen.SUPERCELL_LOGO
+    assert analysis.evidence[0].anchor is ScreenElement.SUPERCELL_LOGO
     assert analysis.evidence[0].details["template"] == "supercell_logo.png"
     assert len(matcher.calls) == 1
     assert matcher.calls[0][0] == _SUPERCELL_LOGO_TEMPLATE
@@ -80,6 +95,12 @@ def test_analyze_screen_detects_home_village_from_anchor_templates() -> None:
     assert analysis.overlay == Overlay.NONE
     assert analysis.confidence == 0.90
     assert _evidence_labels(analysis) == {"attack_button", "shop_button"}
+    assert {evidence.kind for evidence in analysis.evidence} == {EvidenceKind.TEMPLATE}
+    assert {evidence.subject for evidence in analysis.evidence} == {BaseScreen.HOME_VILLAGE}
+    assert {evidence.anchor for evidence in analysis.evidence} == {
+        HomeElement.ATTACK_BUTTON,
+        HomeElement.SHOP_BUTTON,
+    }
     assert [call[0] for call in matcher.calls] == [
         _SUPERCELL_LOGO_TEMPLATE,
         _ATTACK_BUTTON_TEMPLATE,
@@ -147,9 +168,15 @@ def test_analyze_screen_detects_connection_lost_without_try_again_and_short_circ
     assert analysis.base_screen == BaseScreen.UNKNOWN
     assert analysis.overlay == Overlay.CONNECTION_LOST
     assert analysis.recommended_action is not None
-    assert analysis.recommended_action.label == "tap_try_again"
+    assert analysis.recommended_action.kind is ActionKind.TAP
+    assert analysis.recommended_action.target is PopupButton.TRY_AGAIN
+    assert analysis.recommended_action.reason is Overlay.CONNECTION_LOST
+    assert analysis.recommended_action.display_label == "tap_try_again"
     assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
     assert _evidence_labels(analysis) == {"modal.connection_lost"}
+    assert analysis.evidence[0].kind is EvidenceKind.OCR
+    assert analysis.evidence[0].subject is Overlay.CONNECTION_LOST
+    assert analysis.evidence[0].anchor is None
     assert matcher.calls == []
     assert len(reader.calls) == 1
 
@@ -166,9 +193,15 @@ def test_analyze_screen_detects_another_device_before_generic_connection_lost() 
     assert analysis.base_screen == BaseScreen.UNKNOWN
     assert analysis.overlay == Overlay.ANOTHER_DEVICE_CONNECTED
     assert analysis.recommended_action is not None
-    assert analysis.recommended_action.label == "tap_reload"
+    assert analysis.recommended_action.kind is ActionKind.TAP
+    assert analysis.recommended_action.target is PopupButton.RELOAD
+    assert analysis.recommended_action.reason is Overlay.ANOTHER_DEVICE_CONNECTED
+    assert analysis.recommended_action.display_label == "tap_reload"
     assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
     assert _evidence_labels(analysis) == {"modal.another_device_connected"}
+    assert analysis.evidence[0].kind is EvidenceKind.OCR
+    assert analysis.evidence[0].subject is Overlay.ANOTHER_DEVICE_CONNECTED
+    assert analysis.evidence[0].anchor is None
 
 
 def test_analyze_screen_detects_anyone_there_overlay() -> None:
@@ -183,10 +216,16 @@ def test_analyze_screen_detects_anyone_there_overlay() -> None:
     assert analysis.base_screen == BaseScreen.UNKNOWN
     assert analysis.overlay == Overlay.ANYONE_THERE
     assert analysis.recommended_action is not None
-    assert analysis.recommended_action.label == "tap_reload_game"
+    assert analysis.recommended_action.kind is ActionKind.TAP
+    assert analysis.recommended_action.target is PopupButton.RELOAD_GAME
+    assert analysis.recommended_action.reason is Overlay.ANYONE_THERE
+    assert analysis.recommended_action.display_label == "tap_reload_game"
     assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
     assert analysis.recommended_action.tap_target.y != 0.78
     assert _evidence_labels(analysis) == {"modal.anyone_there"}
+    assert analysis.evidence[0].kind is EvidenceKind.OCR
+    assert analysis.evidence[0].subject is Overlay.ANYONE_THERE
+    assert analysis.evidence[0].anchor is None
 
 
 def test_analyze_screen_returns_unknown_without_known_evidence() -> None:
@@ -208,7 +247,7 @@ def _frame(*, width: int = 16, height: int = 16) -> FrameImage:
 
 
 def _evidence_labels(analysis: ScreenAnalysis) -> set[str]:
-    return {evidence.label for evidence in analysis.evidence}
+    return {evidence.display_label for evidence in analysis.evidence}
 
 
 def _home_scale_calls(matcher: FakeTemplateMatcher) -> dict[str, tuple[float, ...]]:

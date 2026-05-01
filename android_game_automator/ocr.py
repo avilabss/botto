@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 from PIL import Image, ImageOps
+from rapidocr_onnxruntime import RapidOCR as _RapidOCR  # type: ignore[import-untyped]
 
 from android_game_automator.image import FrameImage, rect_to_normalized, resolve_region
 from android_game_automator.types import NormalizedRect, Rect, ScreenRect, Size, TextBlock, Viewport
@@ -147,14 +148,7 @@ def _get_rapidocr_recognizer() -> Any:
 
 def _create_rapidocr_recognizer() -> Any:
     try:
-        from rapidocr_onnxruntime import RapidOCR  # type: ignore[import-untyped]
-    except ImportError as exc:
-        raise RuntimeError(
-            "OCR requires RapidOCR; install 'rapidocr-onnxruntime' to use read_text"
-        ) from exc
-
-    try:
-        return RapidOCR()
+        return _RapidOCR()
     except Exception as exc:
         raise RuntimeError(
             "OCR requires RapidOCR; failed to initialize 'rapidocr-onnxruntime'"

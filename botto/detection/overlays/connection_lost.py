@@ -5,7 +5,7 @@ from __future__ import annotations
 from android_game_automator.types import ScreenRect
 
 from ..common import OverlayDetection, blocking_overlay_result, matching_phrases
-from ..models import Overlay
+from .models import Overlay, PopupButton
 
 
 def detect_connection_lost(text: str, *, region: ScreenRect) -> OverlayDetection | None:
@@ -24,8 +24,7 @@ def detect_connection_lost(text: str, *, region: ScreenRect) -> OverlayDetection
 
     return blocking_overlay_result(
         Overlay.CONNECTION_LOST,
-        evidence_label="modal.connection_lost",
-        action_label="tap_try_again",
+        target=PopupButton.TRY_AGAIN,
         text=text,
         phrases=phrases,
         region=region,

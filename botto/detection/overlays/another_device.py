@@ -10,7 +10,7 @@ from ..common import (
     contains_phrase,
     first_matching_phrase,
 )
-from ..models import Overlay
+from .models import Overlay, PopupButton
 
 
 def detect_another_device(text: str, *, region: ScreenRect) -> OverlayDetection | None:
@@ -25,8 +25,7 @@ def detect_another_device(text: str, *, region: ScreenRect) -> OverlayDetection 
 
     return blocking_overlay_result(
         Overlay.ANOTHER_DEVICE_CONNECTED,
-        evidence_label="modal.another_device_connected",
-        action_label="tap_reload",
+        target=PopupButton.RELOAD,
         text=text,
         phrases=("Another device", connection_phrase),
         region=region,

@@ -228,7 +228,7 @@ def _draw_recommended_action(bgr: BgrArray, size: Size, analysis: ScreenAnalysis
     )
     cv2.putText(
         bgr,
-        f"target: {action.label}",
+        f"target: {_display_label(action)}",
         (max(0, target.x + 10), max(12, target.y - 10)),
         cv2.FONT_HERSHEY_SIMPLEX,
         _TEXT_SCALE,
@@ -239,11 +239,18 @@ def _draw_recommended_action(bgr: BgrArray, size: Size, analysis: ScreenAnalysis
 
 
 def _evidence_label(evidence: object) -> str:
-    label = str(getattr(evidence, "label", "")).strip()
+    label = _display_label(evidence)
     confidence = getattr(evidence, "confidence", None)
     if isinstance(confidence, int | float) and not isinstance(confidence, bool):
         return f"{label} {confidence:.2f}" if label else f"{confidence:.2f}"
     return label
+
+
+def _display_label(value: object) -> str:
+    label = getattr(value, "display_label", "")
+    if isinstance(label, str):
+        return label.strip()
+    return ""
 
 
 def _coerce_rect(value: object, size: Size) -> Rect | None:

@@ -6,7 +6,7 @@ import asyncio
 import threading
 
 from android_game_automator.image import FrameImage
-from botto.detection.models import BaseScreen, Overlay, ScreenAnalysis
+from botto.detection import BaseScreen, Overlay, ScreenAnalysis
 from botto.runtime import (
     DEFAULT_CLASH_PACKAGE,
     DEFAULT_RUNTIME_MAX_FPS,

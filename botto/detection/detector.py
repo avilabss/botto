@@ -6,10 +6,12 @@ from android_game_automator.image import FrameImage
 from android_game_automator.ocr import read_text
 from android_game_automator.vision import find_template
 
+from .analysis import ScreenAnalysis
 from .common import TemplateMatcher, TextReader
-from .models import BaseScreen, Overlay, ScreenAnalysis
-from .overlays import detect_overlay
-from .screens import detect_base_screen
+from .overlays.detect import detect_overlay
+from .overlays.models import Overlay
+from .screens.detect import detect_base_screen
+from .screens.models import BaseScreen
 
 
 def analyze_screen(
