@@ -7,11 +7,14 @@ from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from math import isfinite
+from os import PathLike
+from pathlib import Path
 from time import monotonic
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
+from android_game_automator.artifacts import ArtifactStore
 from android_game_automator.image import FrameImage
 from android_game_automator.scrcpy import DEFAULT_SCRCPY_MAX_FPS, ScrcpyFrameSource
 from android_game_automator.types import (
@@ -26,7 +29,7 @@ from android_game_automator.types import (
 )
 
 from android_game_automator.adb import AdbDeviceBackend
-from botto.runner import DEFAULT_CLASH_PACKAGE
+from botto.runner import DEFAULT_ARTIFACT_ROOT, DEFAULT_CLASH_PACKAGE, serialize_screen_analysis
 from botto.screen_detector import analyze_screen
 from botto.screens import Overlay, ScreenAnalysis
 
@@ -34,10 +37,14 @@ DEFAULT_LIVE_DEBUG_WINDOW_TITLE = "Botto live debug"
 DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS = 1.0
 DEFAULT_LIVE_PREVIEW_WINDOW_TITLE = "Botto live preview"
 EXIT_KEY_CODES = frozenset((27, ord("q")))
+_SAVE_RAW_KEY_CODE = ord("s")
+_SAVE_DEBUG_KEY_CODE = ord("d")
+_SAVE_STATUS_SECONDS = 3.0
 
 type BgrArray = npt.NDArray[np.uint8]
 type ClockFn = Callable[[], float]
 type BgrColor = tuple[int, int, int]
+type StatusWriter = Callable[[str], None]
 
 _STATUS_TEXT_COLOR: BgrColor = (255, 255, 255)
 _STATUS_BACKGROUND_COLOR: BgrColor = (0, 0, 0)
@@ -120,6 +127,14 @@ class _PendingLiveAnalysis:
     future: asyncio.Future[ScreenAnalysis]
     started_at: float
     frame_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SavedLiveDebugArtifacts:
+    kind: str
+    label: str
+    image_path: Path
+    analysis_path: Path | None = None
 
 
 class PreviewWindow(Protocol):
@@ -221,11 +236,14 @@ async def run_live_debug(
     max_fps: int = DEFAULT_SCRCPY_MAX_FPS,
     window_title: str = DEFAULT_LIVE_DEBUG_WINDOW_TITLE,
     analyze_every_seconds: float = DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS,
+    artifact_root: str | PathLike[str] = DEFAULT_ARTIFACT_ROOT,
+    run_name: str | None = None,
     backend: LivePreviewBackend | None = None,
     source_factory: LiveFrameSourceFactory | None = None,
     preview_window: PreviewWindow | None = None,
     screen_analyzer: LiveScreenAnalyzer | None = None,
     overlay_renderer: DebugOverlayRenderer | None = None,
+    status_writer: StatusWriter | None = None,
     clock: ClockFn = monotonic,
 ) -> None:
     """Display live scrcpy frames with throttled read-only detector annotations."""
@@ -245,7 +263,6 @@ async def run_live_debug(
     )
     window = preview_window if preview_window is not None else OpenCvPreviewWindow()
     analyzer = screen_analyzer if screen_analyzer is not None else analyze_screen
-    renderer = overlay_renderer if overlay_renderer is not None else render_debug_overlay
 
     session = await resolved_backend.open_session(device_id)
     source: LiveFrameSource | None = None
@@ -253,10 +270,67 @@ async def run_live_debug(
     latest_snapshot: LiveAnalysisSnapshot | None = None
     last_analysis_started_at: float | None = None
     pending_analysis: _PendingLiveAnalysis | None = None
+    artifact_store: ArtifactStore | None = None
+    artifact_sequence = 0
+    save_status_message: str | None = None
+    save_status_until = 0.0
     analysis_executor = ThreadPoolExecutor(
         max_workers=1,
         thread_name_prefix="botto-live-debug-analysis",
     )
+
+    def complete_pending_analysis_if_ready() -> None:
+        nonlocal latest_snapshot, pending_analysis
+        if pending_analysis is not None and pending_analysis.future.done():
+            latest_snapshot = _completed_live_analysis_snapshot(pending_analysis, clock=clock)
+            pending_analysis = None
+
+    def get_artifact_store() -> ArtifactStore:
+        nonlocal artifact_store
+        if artifact_store is None:
+            artifact_store = ArtifactStore(artifact_root, run_name=run_name)
+        return artifact_store
+
+    def save_artifacts_for_hotkey(
+        *,
+        key_code: int,
+        raw_frame: FrameImage,
+        annotated_frame: FrameImage,
+        now: float,
+    ) -> _SavedLiveDebugArtifacts | None:
+        nonlocal artifact_sequence, save_status_message, save_status_until
+
+        if key_code == _SAVE_RAW_KEY_CODE:
+            kind = "raw"
+            image = raw_frame
+            hotkey = "s"
+        elif key_code == _SAVE_DEBUG_KEY_CODE:
+            kind = "debug"
+            image = annotated_frame
+            hotkey = "d"
+        else:
+            return None
+
+        complete_pending_analysis_if_ready()
+        artifact_sequence += 1
+        label = _live_debug_artifact_label(kind=kind, sequence=artifact_sequence)
+        saved = _save_live_debug_artifacts(
+            store=get_artifact_store(),
+            label=label,
+            kind=kind,
+            hotkey=hotkey,
+            image=image,
+            snapshot=latest_snapshot,
+            session_info=session.info,
+            package_name=package_name,
+            launched=launch,
+        )
+        save_status_message = _live_debug_overlay_save_message(saved)
+        save_status_until = now + _SAVE_STATUS_SECONDS
+        if status_writer is not None:
+            status_writer(_live_debug_stdout_save_message(saved))
+        return saved
+
     try:
         if launch:
             await session.launch_app(package_name)
@@ -268,9 +342,7 @@ async def run_live_debug(
         window.open(window_title)
         window_opened = True
         while True:
-            if pending_analysis is not None and pending_analysis.future.done():
-                latest_snapshot = _completed_live_analysis_snapshot(pending_analysis, clock=clock)
-                pending_analysis = None
+            complete_pending_analysis_if_ready()
 
             frame = source.latest_frame()
             frame_time = clock()
@@ -292,15 +364,34 @@ async def run_live_debug(
                     executor=analysis_executor,
                 )
 
-            annotated_frame = renderer(
-                frame,
-                latest_snapshot,
-                now=frame_time,
-                analysis_running=pending_analysis is not None,
-            )
+            if save_status_message is not None and frame_time > save_status_until:
+                save_status_message = None
+            active_save_status = save_status_message
+            if overlay_renderer is None:
+                annotated_frame = render_debug_overlay(
+                    frame,
+                    latest_snapshot,
+                    now=frame_time,
+                    analysis_running=pending_analysis is not None,
+                    status_message=active_save_status,
+                )
+            else:
+                annotated_frame = overlay_renderer(
+                    frame,
+                    latest_snapshot,
+                    now=frame_time,
+                    analysis_running=pending_analysis is not None,
+                )
             window.show(window_title, annotated_frame)
-            if window.wait_key(1) in EXIT_KEY_CODES:
+            key_code = window.wait_key(1)
+            if key_code in EXIT_KEY_CODES:
                 break
+            save_artifacts_for_hotkey(
+                key_code=key_code,
+                raw_frame=frame,
+                annotated_frame=annotated_frame,
+                now=frame_time,
+            )
             await asyncio.sleep(0)
     finally:
         try:
@@ -357,17 +448,150 @@ async def _finish_pending_live_analysis(pending: _PendingLiveAnalysis | None) ->
     await asyncio.shield(pending.future)
 
 
+def _live_debug_artifact_label(*, kind: str, sequence: int) -> str:
+    return f"live-debug-{kind}-{sequence:06d}"
+
+
+def _save_live_debug_artifacts(
+    *,
+    store: ArtifactStore,
+    label: str,
+    kind: str,
+    hotkey: str,
+    image: FrameImage,
+    snapshot: LiveAnalysisSnapshot | None,
+    session_info: SessionInfo,
+    package_name: str,
+    launched: bool,
+) -> _SavedLiveDebugArtifacts:
+    metadata = _live_debug_artifact_metadata(
+        label=label,
+        kind=kind,
+        hotkey=hotkey,
+        image=image,
+        session_info=session_info,
+        package_name=package_name,
+        launched=launched,
+    )
+    image_path = store.save_image(label, image, metadata=metadata)
+    analysis_path: Path | None = None
+    if snapshot is not None:
+        analysis_path = store.save_json(
+            label,
+            _live_debug_analysis_payload(
+                snapshot=snapshot,
+                saved_frame=image,
+                session_info=session_info,
+                package_name=package_name,
+                launched=launched,
+                image_kind=kind,
+                artifact_label=label,
+            ),
+            metadata=metadata
+            | {
+                "analysis_frame_id": snapshot.frame_id,
+            },
+        )
+    return _SavedLiveDebugArtifacts(
+        kind=kind,
+        label=label,
+        image_path=image_path,
+        analysis_path=analysis_path,
+    )
+
+
+def _live_debug_artifact_metadata(
+    *,
+    label: str,
+    kind: str,
+    hotkey: str,
+    image: FrameImage,
+    session_info: SessionInfo,
+    package_name: str,
+    launched: bool,
+) -> dict[str, Any]:
+    return {
+        "artifact_label": label,
+        "device_id": session_info.device.identity.device_id,
+        "frame_id": image.frame_id,
+        "height": image.size.height,
+        "hotkey": hotkey,
+        "image_kind": kind,
+        "launched": launched,
+        "package": package_name,
+        "pixel_format": image.pixel_format.value,
+        "session_id": session_info.session_id,
+        "width": image.size.width,
+    }
+
+
+def _live_debug_analysis_payload(
+    *,
+    snapshot: LiveAnalysisSnapshot,
+    saved_frame: FrameImage,
+    session_info: SessionInfo,
+    package_name: str,
+    launched: bool,
+    image_kind: str,
+    artifact_label: str,
+) -> dict[str, Any]:
+    return {
+        "analysis": serialize_screen_analysis(snapshot.analysis),
+        "analysis_frame_id": snapshot.frame_id,
+        "analyzed_at": snapshot.analyzed_at,
+        "artifact_label": artifact_label,
+        "device_id": session_info.device.identity.device_id,
+        "duration_seconds": snapshot.duration_seconds,
+        "frame": _serialize_live_debug_frame(saved_frame),
+        "image_kind": image_kind,
+        "launched": launched,
+        "package": package_name,
+        "session_id": session_info.session_id,
+    }
+
+
+def _serialize_live_debug_frame(image: FrameImage) -> dict[str, Any]:
+    return {
+        "captured_at": image.captured_at.isoformat() if image.captured_at is not None else None,
+        "frame_id": image.frame_id,
+        "pixel_format": image.pixel_format.value,
+        "size": {
+            "height": image.size.height,
+            "width": image.size.width,
+        },
+    }
+
+
+def _live_debug_overlay_save_message(saved: _SavedLiveDebugArtifacts) -> str:
+    analysis_suffix = " + analysis" if saved.analysis_path is not None else ""
+    return f"saved {saved.kind}: {saved.label}{analysis_suffix}"
+
+
+def _live_debug_stdout_save_message(saved: _SavedLiveDebugArtifacts) -> str:
+    parts = [f"image={saved.image_path}"]
+    if saved.analysis_path is not None:
+        parts.append(f"analysis={saved.analysis_path}")
+    return f"saved live-debug {saved.kind} artifact {saved.label}: " + ", ".join(parts)
+
+
 def render_debug_overlay(
     frame: FrameImage,
     snapshot: LiveAnalysisSnapshot | None,
     *,
     now: float | None = None,
     analysis_running: bool = False,
+    status_message: str | None = None,
 ) -> FrameImage:
     """Return a copy of ``frame`` annotated with live detector state and evidence."""
 
     bgr = frame_image_to_bgr_array(frame)
-    status_lines = _debug_status_lines(snapshot, now=now, analysis_running=analysis_running)
+    status_lines = _debug_status_lines(
+        snapshot,
+        now=now,
+        analysis_running=analysis_running,
+        frame_size=frame.size,
+        status_message=status_message,
+    )
     _draw_status_lines(bgr, status_lines)
 
     if snapshot is not None:
@@ -411,15 +635,26 @@ def _debug_status_lines(
     *,
     now: float | None,
     analysis_running: bool = False,
+    frame_size: Size | None = None,
+    status_message: str | None = None,
 ) -> tuple[str, ...]:
+    lines: list[str] = []
+    if frame_size is not None:
+        lines.append(f"frame: {frame_size.width}x{frame_size.height}")
+
     if snapshot is None:
-        return ("analysis: running" if analysis_running else "analysis: pending",)
+        lines.append("analysis: running" if analysis_running else "analysis: pending")
+        if status_message:
+            lines.append(status_message)
+        return tuple(lines)
 
     analysis = snapshot.analysis
-    lines = [
-        f"base: {analysis.base_screen.value}",
-        f"overlay: {analysis.overlay.value}  conf: {analysis.confidence:.2f}",
-    ]
+    lines.extend(
+        (
+            f"base: {analysis.base_screen.value}",
+            f"overlay: {analysis.overlay.value}  conf: {analysis.confidence:.2f}",
+        )
+    )
     timing_parts: list[str] = []
     if now is not None:
         timing_parts.append(f"age: {max(0.0, now - snapshot.analyzed_at):.1f}s")
@@ -431,6 +666,8 @@ def _debug_status_lines(
         lines.append("analysis " + "  ".join(timing_parts))
     elif analysis_running:
         lines.append("analysis running")
+    if status_message:
+        lines.append(status_message)
     return tuple(lines)
 
 

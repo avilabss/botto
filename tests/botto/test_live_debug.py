@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from io import StringIO
+from pathlib import Path
 
 import botto.live as live_module
 import pytest
@@ -24,6 +26,7 @@ from botto.cli import run
 from botto.live import LiveAnalysisSnapshot, render_debug_overlay, run_live_debug
 from botto.runner import DEFAULT_CLASH_PACKAGE
 from botto.screens import BaseScreen, Evidence, Overlay, RecommendedAction, ScreenAnalysis
+from PIL import Image
 
 
 def test_live_debug_launches_default_package_and_starts_scrcpy_source() -> None:
@@ -219,6 +222,165 @@ def test_live_debug_uses_latest_frame_without_consuming_stale_frame_queue() -> N
     assert source.frames_calls == 0
 
 
+def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis_from_cli_options(
+    tmp_path: Path,
+) -> None:
+    stdout = StringIO()
+    stderr = StringIO()
+    session = FakeSession(device_id="emulator-5554")
+    backend = FakeBackend(session=session)
+    source = FakeLiveSource(
+        frames=(
+            make_frame("frame-1", rgba=(1, 2, 3, 255)),
+            make_frame("frame-2", rgba=(40, 50, 60, 255)),
+        )
+    )
+    source_factory = FakeLiveSourceFactory(source)
+    analysis = ScreenAnalysis(
+        base_screen=BaseScreen.HOME_VILLAGE,
+        overlay=Overlay.NONE,
+        confidence=0.8,
+    )
+    analyzer = BlockingAnalyzer(analysis)
+    preview = FakePreviewWindow(
+        keys=(-1, ord("s"), ord("q")),
+        wait_callbacks=(analyzer.wait_until_started_release_and_finish,),
+    )
+
+    exit_code = run(
+        [
+            "live-debug",
+            "--device",
+            "emulator-5554",
+            "--skip-launch",
+            "--output-dir",
+            str(tmp_path),
+            "--run-name",
+            "live-run",
+        ],
+        backend_factory=lambda: backend,
+        live_source_factory=source_factory,
+        preview_window=preview,
+        screen_analyzer=analyzer,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    image_path = tmp_path / "live-run" / "images" / "live-debug-raw-000001.png"
+    analysis_path = tmp_path / "live-run" / "json" / "live-debug-raw-000001.json"
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert image_path.is_file()
+    assert analysis_path.is_file()
+    assert str(image_path) in stdout.getvalue()
+    assert str(analysis_path) in stdout.getvalue()
+    with Image.open(image_path) as saved_image:
+        assert saved_image.getpixel((0, 0)) == (40, 50, 60, 255)
+    payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert payload["analysis"]["base_screen"] == "home_village"
+    assert payload["analysis_frame_id"] == "frame-1"
+    assert payload["frame"]["frame_id"] == "frame-2"
+    manifest_entries = [
+        json.loads(line)
+        for line in (tmp_path / "live-run" / "manifest.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert {entry["run_name"] for entry in manifest_entries} == {"live-run"}
+    assert {entry["run_dir"] for entry in manifest_entries} == {"live-run"}
+
+
+def test_live_debug_d_hotkey_saves_annotated_frame_and_latest_analysis(
+    tmp_path: Path,
+) -> None:
+    session = FakeSession(device_id="emulator-5554")
+    backend = FakeBackend(session=session)
+    source = FakeLiveSource(
+        frames=(
+            make_frame("frame-1", rgba=(1, 2, 3, 255)),
+            make_frame("frame-2", rgba=(40, 50, 60, 255)),
+            make_frame("frame-3", rgba=(70, 80, 90, 255)),
+        )
+    )
+    source_factory = FakeLiveSourceFactory(source)
+    analysis = ScreenAnalysis(
+        base_screen=BaseScreen.UNKNOWN,
+        overlay=Overlay.CONNECTION_LOST,
+        confidence=0.9,
+    )
+    analyzer = BlockingAnalyzer(analysis)
+    preview = FakePreviewWindow(
+        keys=(-1, ord("d"), ord("q")),
+        wait_callbacks=(analyzer.wait_until_started_release_and_finish,),
+    )
+
+    asyncio.run(
+        run_live_debug(
+            device_id="emulator-5554",
+            launch=False,
+            artifact_root=tmp_path,
+            run_name="debug-run",
+            backend=backend,
+            source_factory=source_factory,
+            preview_window=preview,
+            screen_analyzer=analyzer,
+            overlay_renderer=SolidDebugRenderer(rgba=(9, 8, 7, 255)),
+        )
+    )
+
+    image_path = tmp_path / "debug-run" / "images" / "live-debug-debug-000001.png"
+    analysis_path = tmp_path / "debug-run" / "json" / "live-debug-debug-000001.json"
+    assert image_path.is_file()
+    assert analysis_path.is_file()
+    with Image.open(image_path) as saved_image:
+        assert saved_image.getpixel((0, 0)) == (9, 8, 7, 255)
+    payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert payload["analysis"]["overlay"] == "connection_lost"
+    assert payload["frame"]["frame_id"] == "frame-2-debug"
+    assert [frame.frame_id for frame in preview.shown_frames] == [
+        "frame-1-debug",
+        "frame-2-debug",
+        "frame-3-debug",
+    ]
+    assert session.input_actions == []
+    assert session.recovery_actions == []
+
+
+def test_live_debug_hotkey_skips_analysis_json_when_no_snapshot_exists(
+    tmp_path: Path,
+) -> None:
+    session = FakeSession(device_id="emulator-5554")
+    backend = FakeBackend(session=session)
+    source = FakeLiveSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
+    source_factory = FakeLiveSourceFactory(source)
+    analyzer = BlockingAnalyzer()
+    preview = FakePreviewWindow(
+        keys=(ord("s"), ord("q")),
+        wait_callbacks=(analyzer.wait_until_started, analyzer.release),
+    )
+
+    asyncio.run(
+        run_live_debug(
+            device_id="emulator-5554",
+            launch=False,
+            artifact_root=tmp_path,
+            run_name="no-analysis-run",
+            backend=backend,
+            source_factory=source_factory,
+            preview_window=preview,
+            screen_analyzer=analyzer,
+            overlay_renderer=passthrough_renderer,
+        )
+    )
+
+    image_path = tmp_path / "no-analysis-run" / "images" / "live-debug-raw-000001.png"
+    assert image_path.is_file()
+    assert not (tmp_path / "no-analysis-run" / "json").exists()
+    assert source.latest_frame_calls == 2
+    assert session.input_actions == []
+    assert session.recovery_actions == []
+
+
 def test_debug_status_lines_indicate_analysis_running_with_timing() -> None:
     analysis = ScreenAnalysis(
         base_screen=BaseScreen.UNKNOWN,
@@ -238,6 +400,26 @@ def test_debug_status_lines_indicate_analysis_running_with_timing() -> None:
     lines = live_module._debug_status_lines(snapshot, now=2.0, analysis_running=True)
 
     assert lines[-1] == "analysis age: 1.0s  took: 0.25s  running"
+
+
+def test_debug_overlay_status_includes_frame_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_lines: list[tuple[str, ...]] = []
+
+    def capture_status_lines(bgr: object, lines: tuple[str, ...]) -> None:
+        _ = bgr
+        captured_lines.append(lines)
+
+    monkeypatch.setattr(live_module, "_draw_status_lines", capture_status_lines)
+
+    render_debug_overlay(
+        make_frame("frame-1", width=108, height=50),
+        None,
+        now=1.0,
+        analysis_running=True,
+    )
+
+    assert captured_lines[0][0] == "frame: 108x50"
+    assert captured_lines[0][1] == "analysis: running"
 
 
 def test_debug_overlay_renderer_annotates_copy_with_evidence_and_target() -> None:
@@ -401,6 +583,12 @@ class BlockingAnalyzer:
         self.wait_until_started()
         self.release()
 
+    def wait_until_started_release_and_finish(self) -> None:
+        self.wait_until_started()
+        self.release()
+        if not self.finished.wait(timeout=2.0):
+            raise AssertionError("analysis did not finish")
+
 
 class IncrementingClock:
     def __init__(self) -> None:
@@ -435,6 +623,27 @@ class CapturingRenderer:
         _ = snapshot, now
         self.calls.append(RenderCall(frame_id=frame.frame_id, analysis_running=analysis_running))
         return frame
+
+
+class SolidDebugRenderer:
+    def __init__(self, *, rgba: tuple[int, int, int, int]) -> None:
+        self._rgba = rgba
+
+    def __call__(
+        self,
+        frame: FrameImage,
+        snapshot: LiveAnalysisSnapshot | None,
+        *,
+        now: float | None = None,
+        analysis_running: bool = False,
+    ) -> FrameImage:
+        _ = snapshot, now, analysis_running
+        return make_frame(
+            f"{frame.frame_id}-debug" if frame.frame_id is not None else "debug-frame",
+            width=frame.width,
+            height=frame.height,
+            rgba=self._rgba,
+        )
 
 
 class FakeBackend:

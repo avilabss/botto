@@ -229,6 +229,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum scrcpy video frame rate; 0 leaves scrcpy unlimited.",
     )
     live_debug_parser.add_argument(
+        "--output-dir",
+        default=DEFAULT_ARTIFACT_ROOT,
+        help="Directory where live-debug hotkey artifacts are saved.",
+    )
+    live_debug_parser.add_argument(
+        "--run-name",
+        help="Run directory name under --output-dir. Defaults to a timestamped unique name.",
+    )
+    live_debug_parser.add_argument(
         "--window-title",
         default=DEFAULT_LIVE_DEBUG_WINDOW_TITLE,
         help="OpenCV window title for the live debug preview.",
@@ -394,10 +403,13 @@ async def _run_command(
                 max_fps=args.max_fps,
                 window_title=args.window_title,
                 analyze_every_seconds=args.analyze_every_seconds,
+                artifact_root=args.output_dir,
+                run_name=args.run_name,
                 backend=backend,
                 source_factory=live_source_factory,
                 preview_window=preview_window,
                 screen_analyzer=screen_analyzer if screen_analyzer is not None else analyze_screen,
+                status_writer=lambda message: print(message, file=stdout),
             )
         except ValueError as exc:
             raise CliError(str(exc)) from exc
