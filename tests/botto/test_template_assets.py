@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from botto.detection.templates import TEMPLATE_DIR
 from PIL import Image
 
-TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "botto" / "assets" / "templates"
 TEMPLATE_NAMES = ("supercell_logo.png", "attack_button.png", "shop_button.png")
 
 

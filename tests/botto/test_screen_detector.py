@@ -8,9 +8,11 @@ from os import PathLike
 from pathlib import Path
 
 from android_game_automator.image import FrameImage
-from android_game_automator.types import Match, NormalizedPoint, PixelFormat, Rect, ScreenRect, Size
-from botto.screen_detector import analyze_screen
-from botto.screens import BaseScreen, Overlay, ScreenAnalysis
+from android_game_automator.types import Match, NormalizedPoint, Rect, ScreenRect
+from botto.detection.detector import analyze_screen
+from botto.detection.models import BaseScreen, Overlay, ScreenAnalysis
+
+from tests.botto.fakes import make_frame
 
 
 def test_analyze_screen_detects_loading_from_ocr() -> None:
@@ -196,11 +198,7 @@ def test_analyze_screen_returns_unknown_without_known_evidence() -> None:
 
 
 def _frame(*, width: int = 16, height: int = 16) -> FrameImage:
-    return FrameImage(
-        size=Size(width=width, height=height),
-        pixel_format=PixelFormat.RGBA32,
-        data=bytes((0, 0, 0, 255)) * (width * height),
-    )
+    return make_frame(frame_id=None, width=width, height=height, rgba=(0, 0, 0, 255))
 
 
 def _evidence_labels(analysis: ScreenAnalysis) -> set[str]:

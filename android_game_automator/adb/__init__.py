@@ -1,14 +1,13 @@
-"""ADB implementation for device discovery, capture, and input."""
+"""ADB implementation for device discovery and app lifecycle helpers."""
 
 from __future__ import annotations
 
-from .device import AdbDeviceBackend, AdbDeviceSession, AdbDisplayState, AndroidKey
+from .device import AdbDeviceBackend, AdbDeviceSession, AdbDisplayState
 from .errors import (
     AdbBackendError,
     AdbDeviceDiscoveryError,
     AdbDeviceUnavailableError,
     AdbDisplayStateError,
-    AdbFrameCaptureError,
     AdbSessionClosedError,
 )
 
@@ -20,7 +19,5 @@ __all__ = [
     "AdbDeviceUnavailableError",
     "AdbDisplayState",
     "AdbDisplayStateError",
-    "AdbFrameCaptureError",
     "AdbSessionClosedError",
-    "AndroidKey",
 ]

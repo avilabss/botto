@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Iterable
 from os import PathLike
@@ -11,10 +10,16 @@ from typing import Protocol
 
 from android_game_automator.image import FrameImage
 from android_game_automator.ocr import read_text
-from android_game_automator.types import Match, NormalizedPoint, NormalizedRect, ScreenRect, Size
+from android_game_automator.types import Match, NormalizedPoint, NormalizedRect, ScreenRect
 from android_game_automator.vision import find_template
 
-from botto.screens import BaseScreen, Evidence, Overlay, RecommendedAction, ScreenAnalysis
+from .models import BaseScreen, Evidence, Overlay, RecommendedAction, ScreenAnalysis
+from .templates import (
+    ATTACK_BUTTON_TEMPLATE,
+    SHOP_BUTTON_TEMPLATE,
+    SUPERCELL_LOGO_TEMPLATE,
+    home_template_scales,
+)
 
 
 class TextReader(Protocol):
@@ -37,19 +42,11 @@ class TemplateMatcher(Protocol):
     ) -> Match | None: ...
 
 
-_TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "templates"
-_SUPERCELL_LOGO_TEMPLATE = _TEMPLATE_DIR / "supercell_logo.png"
-_ATTACK_BUTTON_TEMPLATE = _TEMPLATE_DIR / "attack_button.png"
-_SHOP_BUTTON_TEMPLATE = _TEMPLATE_DIR / "shop_button.png"
-
 _MODAL_TEXT_REGION = NormalizedRect(left=0.22, top=0.58, width=0.56, height=0.39)
 _LOADING_TEXT_REGION = NormalizedRect(left=0.28, top=0.70, width=0.44, height=0.20)
 _SUPERCELL_LOGO_REGION = NormalizedRect(left=0.20, top=0.20, width=0.60, height=0.60)
 _ATTACK_BUTTON_REGION = NormalizedRect(left=0.00, top=0.74, width=0.25, height=0.26)
 _SHOP_BUTTON_REGION = NormalizedRect(left=0.80, top=0.72, width=0.20, height=0.28)
-
-_HOME_TEMPLATE_REFERENCE_SIZE = Size(width=1080, height=504)
-_HOME_TEMPLATE_SCALE_MULTIPLIERS = (0.95, 1.0, 1.05)
 
 _BLOCKING_POPUP_BUTTON_TAP_TARGET = NormalizedPoint(x=0.50, y=0.88)
 _OCR_CONFIDENCE = 0.9
@@ -144,7 +141,7 @@ def _detect_base_screen(
 ) -> tuple[BaseScreen, float, tuple[Evidence, ...]]:
     supercell_evidence = _template_evidence(
         image,
-        template_path=_SUPERCELL_LOGO_TEMPLATE,
+        template_path=SUPERCELL_LOGO_TEMPLATE,
         label="supercell_logo",
         region=_SUPERCELL_LOGO_REGION,
         min_confidence=_SUPERCELL_TEMPLATE_CONFIDENCE,
@@ -153,13 +150,13 @@ def _detect_base_screen(
     if supercell_evidence is not None:
         return BaseScreen.SUPERCELL_LOGO, supercell_evidence.confidence, (supercell_evidence,)
 
-    home_scales = _home_template_scales(image.size)
+    home_scales = home_template_scales(image.size)
     home_evidence = tuple(
         evidence
         for evidence in (
             _template_evidence(
                 image,
-                template_path=_ATTACK_BUTTON_TEMPLATE,
+                template_path=ATTACK_BUTTON_TEMPLATE,
                 label="attack_button",
                 region=_ATTACK_BUTTON_REGION,
                 min_confidence=_HOME_ANCHOR_CONFIDENCE,
@@ -168,7 +165,7 @@ def _detect_base_screen(
             ),
             _template_evidence(
                 image,
-                template_path=_SHOP_BUTTON_TEMPLATE,
+                template_path=SHOP_BUTTON_TEMPLATE,
                 label="shop_button",
                 region=_SHOP_BUTTON_REGION,
                 min_confidence=_HOME_ANCHOR_CONFIDENCE,
@@ -262,23 +259,6 @@ def _template_evidence(
             "template": template_path.name,
         },
     )
-
-
-def _home_template_scales(frame_size: Size) -> tuple[float, ...]:
-    width_scale = frame_size.width / _HOME_TEMPLATE_REFERENCE_SIZE.width
-    height_scale = frame_size.height / _HOME_TEMPLATE_REFERENCE_SIZE.height
-    expected_scale = (width_scale + height_scale) / 2.0
-
-    scales: list[float] = []
-    seen: set[float] = set()
-    for multiplier in _HOME_TEMPLATE_SCALE_MULTIPLIERS:
-        scale = expected_scale * multiplier
-        if not math.isfinite(scale) or scale <= 0.0 or scale in seen:
-            continue
-        seen.add(scale)
-        scales.append(scale)
-
-    return tuple(scales)
 
 
 def _anyone_there_popup_phrases(text: str) -> tuple[str, ...] | None:

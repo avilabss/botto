@@ -8,49 +8,23 @@ import json
 import sys
 from collections.abc import Sequence
 from importlib import metadata
-from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol, TextIO
 
-from android_game_automator.artifacts import ArtifactStore
-from android_game_automator.image import FrameImage
-from android_game_automator.scrcpy import DEFAULT_SCRCPY_MAX_FPS
-from android_game_automator.types import DeviceInfo, SessionInfo
+from android_game_automator.types import DeviceInfo
 
 from android_game_automator.adb import AdbDeviceBackend
+from botto.detection import analyze_screen
 from botto.live import (
-    DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS,
-    DEFAULT_LIVE_DEBUG_WINDOW_TITLE,
-    DEFAULT_LIVE_PREVIEW_WINDOW_TITLE,
-    LiveFrameSourceFactory,
+    LiveDebugBackend,
+    LiveDebugFrameSourceFactory,
+    LiveScreenAnalyzer,
     PreviewWindow,
     run_live_debug,
-    run_live_preview,
 )
-from botto.runner import (
-    DEFAULT_ARTIFACT_ROOT,
-    DEFAULT_CLASH_PACKAGE,
-    DEFAULT_LAUNCH_WAIT_SECONDS,
-    ScreenAnalyzer,
-    analyze_once,
-)
-from botto.screen_detector import analyze_screen
 
 
-class _Session(Protocol):
-    @property
-    def info(self) -> SessionInfo: ...
-
-    async def close(self) -> None: ...
-
-    async def launch_app(self, package_name: str) -> None: ...
-
-    async def screenshot(self) -> FrameImage: ...
-
-
-class _Backend(Protocol):
+class _Backend(LiveDebugBackend, Protocol):
     async def list_devices(self) -> tuple[DeviceInfo, ...]: ...
-
-    async def open_session(self, device_id: str | None = None) -> _Session: ...
 
 
 class _BackendFactory(Protocol):
@@ -92,161 +66,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print machine-readable JSON output.",
     )
 
-    session_parser = subparsers.add_parser(
-        "session",
-        help="Inspect a live SDK session for one adb device.",
-    )
-    session_parser.add_argument(
-        "--device",
-        help="ADB device serial. If omitted, the only connected device is used.",
-    )
-    session_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print machine-readable JSON output.",
-    )
-
-    capture_parser = subparsers.add_parser(
-        "capture",
-        help="Capture a screenshot and save it as a PNG file.",
-    )
-    capture_parser.add_argument(
-        "--device",
-        help="ADB device serial. If omitted, the only connected device is used.",
-    )
-    capture_parser.add_argument(
-        "--output-dir",
-        default=DEFAULT_ARTIFACT_ROOT,
-        help="Directory where the PNG screenshot is saved.",
-    )
-    capture_parser.add_argument(
-        "--label",
-        default="device-capture",
-        help="Filename stem for the saved screenshot under the run's images/ directory.",
-    )
-    capture_parser.add_argument(
-        "--run-name",
-        help="Run directory name under --output-dir. Defaults to a timestamped unique name.",
-    )
-    capture_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print machine-readable JSON output.",
-    )
-
-    analyze_parser = subparsers.add_parser(
-        "analyze",
-        help="Capture one screenshot and save read-only screen analysis artifacts.",
-    )
-    analyze_parser.add_argument(
-        "--serial",
-        "--device",
-        dest="device",
-        help="ADB device serial. If omitted, the only connected device is used.",
-    )
-    analyze_parser.add_argument(
-        "--output-dir",
-        default=DEFAULT_ARTIFACT_ROOT,
-        help="Directory where the screenshot and analysis artifacts are saved.",
-    )
-    analyze_parser.add_argument(
-        "--run-name",
-        help="Run directory name under --output-dir. Defaults to a timestamped unique name.",
-    )
-    analyze_parser.add_argument(
-        "--package",
-        default=DEFAULT_CLASH_PACKAGE,
-        help="Android package to launch before capture.",
-    )
-    analyze_parser.add_argument(
-        "--skip-launch",
-        action="store_true",
-        help="Analyze the current screen without launching the app first.",
-    )
-    analyze_parser.add_argument(
-        "--launch-wait-seconds",
-        type=float,
-        default=DEFAULT_LAUNCH_WAIT_SECONDS,
-        help="Seconds to wait after launch before capturing a screenshot.",
-    )
-
-    live_preview_parser = subparsers.add_parser(
-        "live-preview",
-        help="Show a read-only live scrcpy preview window.",
-    )
-    live_preview_parser.add_argument(
-        "--serial",
-        "--device",
-        dest="device",
-        help="ADB device serial. If omitted, the only connected device is used.",
-    )
-    live_preview_parser.add_argument(
-        "--package",
-        default=DEFAULT_CLASH_PACKAGE,
-        help="Android package to launch before showing the preview.",
-    )
-    live_preview_parser.add_argument(
-        "--skip-launch",
-        action="store_true",
-        help="Preview the current screen without launching the app first.",
-    )
-    live_preview_parser.add_argument(
-        "--max-fps",
-        type=int,
-        default=DEFAULT_SCRCPY_MAX_FPS,
-        help="Maximum scrcpy video frame rate; 0 leaves scrcpy unlimited.",
-    )
-    live_preview_parser.add_argument(
-        "--window-title",
-        default=DEFAULT_LIVE_PREVIEW_WINDOW_TITLE,
-        help="OpenCV window title for the live preview.",
-    )
-
-    live_debug_parser = subparsers.add_parser(
-        "live-debug",
+    debug_parser = subparsers.add_parser(
+        "debug",
         help="Show read-only live scrcpy video with throttled detector annotations.",
     )
-    live_debug_parser.add_argument(
+    debug_parser.add_argument(
         "--serial",
         "--device",
         dest="device",
         help="ADB device serial. If omitted, the only connected device is used.",
     )
-    live_debug_parser.add_argument(
-        "--package",
-        default=DEFAULT_CLASH_PACKAGE,
-        help="Android package to launch before showing the debug preview.",
-    )
-    live_debug_parser.add_argument(
+    debug_parser.add_argument(
         "--skip-launch",
         action="store_true",
         help="Debug the current screen without launching the app first.",
-    )
-    live_debug_parser.add_argument(
-        "--max-fps",
-        type=int,
-        default=DEFAULT_SCRCPY_MAX_FPS,
-        help="Maximum scrcpy video frame rate; 0 leaves scrcpy unlimited.",
-    )
-    live_debug_parser.add_argument(
-        "--output-dir",
-        default=DEFAULT_ARTIFACT_ROOT,
-        help="Directory where live-debug hotkey artifacts are saved.",
-    )
-    live_debug_parser.add_argument(
-        "--run-name",
-        help="Run directory name under --output-dir. Defaults to a timestamped unique name.",
-    )
-    live_debug_parser.add_argument(
-        "--window-title",
-        default=DEFAULT_LIVE_DEBUG_WINDOW_TITLE,
-        help="OpenCV window title for the live debug preview.",
-    )
-    live_debug_parser.add_argument(
-        "--analyze-every-seconds",
-        type=float,
-        default=DEFAULT_LIVE_DEBUG_ANALYZE_EVERY_SECONDS,
-        help="Minimum seconds between detector runs on live frames.",
     )
     return parser
 
@@ -255,8 +88,8 @@ def run(
     argv: Sequence[str] | None = None,
     *,
     backend_factory: _BackendFactory = AdbDeviceBackend,
-    screen_analyzer: ScreenAnalyzer | None = None,
-    live_source_factory: LiveFrameSourceFactory | None = None,
+    screen_analyzer: LiveScreenAnalyzer | None = None,
+    live_source_factory: LiveDebugFrameSourceFactory | None = None,
     preview_window: PreviewWindow | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
@@ -295,8 +128,8 @@ async def _run_command(
     args: argparse.Namespace,
     *,
     backend_factory: _BackendFactory,
-    screen_analyzer: ScreenAnalyzer | None,
-    live_source_factory: LiveFrameSourceFactory | None,
+    screen_analyzer: LiveScreenAnalyzer | None,
+    live_source_factory: LiveDebugFrameSourceFactory | None,
     preview_window: PreviewWindow | None,
     stdout: TextIO,
 ) -> int:
@@ -307,104 +140,11 @@ async def _run_command(
         _write_payload(_serialize_devices(devices), as_json=args.json, stdout=stdout)
         return 0
 
-    if args.command == "session":
-        session = await _open_selected_session(backend, requested_device_id=args.device)
-        try:
-            payload = await _serialize_session(session)
-        finally:
-            await session.close()
-        _write_payload(payload, as_json=args.json, stdout=stdout)
-        return 0
-
-    if args.command == "capture":
-        _validate_capture_label(args.label)
-        try:
-            artifact_store = ArtifactStore(Path(args.output_dir), run_name=args.run_name)
-        except ValueError as exc:
-            raise CliError(str(exc)) from exc
-        session = await _open_selected_session(backend, requested_device_id=args.device)
-        try:
-            image = await session.screenshot()
-            try:
-                saved_path = artifact_store.save_image(
-                    args.label,
-                    image,
-                    metadata=_capture_artifact_metadata(session=session, image=image),
-                )
-            except ValueError as exc:
-                raise CliError(str(exc)) from exc
-        finally:
-            await session.close()
-        _write_payload(
-            {
-                "device_id": session.info.device.identity.device_id,
-                "session_id": session.info.session_id,
-                "saved_path": str(saved_path),
-                "output_dir": str(artifact_store.root),
-                "run_dir": str(artifact_store.run_dir),
-                "frame": {
-                    "size": {
-                        "width": image.size.width,
-                        "height": image.size.height,
-                    },
-                    "pixel_format": image.pixel_format.value,
-                    "captured_at": image.captured_at.isoformat()
-                    if image.captured_at is not None
-                    else None,
-                    "frame_id": image.frame_id,
-                },
-            },
-            as_json=args.json,
-            stdout=stdout,
-        )
-        return 0
-
-    if args.command == "analyze":
-        if args.launch_wait_seconds < 0:
-            raise CliError("--launch-wait-seconds must be >= 0.")
-        try:
-            payload = await analyze_once(
-                device_id=args.device,
-                artifact_root=args.output_dir,
-                run_name=args.run_name,
-                package_name=args.package,
-                launch=not args.skip_launch,
-                launch_wait_seconds=args.launch_wait_seconds,
-                backend=backend,
-                screen_analyzer=screen_analyzer if screen_analyzer is not None else analyze_screen,
-            )
-        except ValueError as exc:
-            raise CliError(str(exc)) from exc
-        _write_payload(payload, as_json=True, stdout=stdout)
-        return 0
-
-    if args.command == "live-preview":
-        try:
-            await run_live_preview(
-                device_id=args.device,
-                package_name=args.package,
-                launch=not args.skip_launch,
-                max_fps=args.max_fps,
-                window_title=args.window_title,
-                backend=backend,
-                source_factory=live_source_factory,
-                preview_window=preview_window,
-            )
-        except ValueError as exc:
-            raise CliError(str(exc)) from exc
-        return 0
-
-    if args.command == "live-debug":
+    if args.command == "debug":
         try:
             await run_live_debug(
                 device_id=args.device,
-                package_name=args.package,
                 launch=not args.skip_launch,
-                max_fps=args.max_fps,
-                window_title=args.window_title,
-                analyze_every_seconds=args.analyze_every_seconds,
-                artifact_root=args.output_dir,
-                run_name=args.run_name,
                 backend=backend,
                 source_factory=live_source_factory,
                 preview_window=preview_window,
@@ -418,41 +158,6 @@ async def _run_command(
     raise CliError(f"Unsupported command {args.command!r}")
 
 
-async def _open_selected_session(
-    backend: _Backend,
-    *,
-    requested_device_id: str | None,
-) -> _Session:
-    return await backend.open_session(requested_device_id)
-
-
-def _validate_capture_label(label: str) -> None:
-    cleaned_label = label.strip()
-    if not cleaned_label:
-        raise CliError("--label must be non-empty.")
-    if "\x00" in cleaned_label:
-        raise CliError("--label must not contain NUL bytes.")
-
-    label_path = Path(cleaned_label)
-    if (
-        label_path.name != cleaned_label
-        or PureWindowsPath(cleaned_label).name != cleaned_label
-        or cleaned_label in {".", ".."}
-    ):
-        raise CliError("--label must be a filename stem, not a path.")
-
-
-def _capture_artifact_metadata(*, session: _Session, image: FrameImage) -> dict[str, Any]:
-    return {
-        "device_id": session.info.device.identity.device_id,
-        "session_id": session.info.session_id,
-        "frame_id": image.frame_id,
-        "pixel_format": image.pixel_format.value,
-        "width": image.size.width,
-        "height": image.size.height,
-    }
-
-
 def _serialize_devices(devices: tuple[DeviceInfo, ...]) -> list[dict[str, Any]]:
     return [
         {
@@ -463,26 +168,6 @@ def _serialize_devices(devices: tuple[DeviceInfo, ...]) -> list[dict[str, Any]]:
         }
         for device in devices
     ]
-
-
-async def _serialize_session(session: _Session) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "session_id": session.info.session_id,
-        "started_at": session.info.started_at.isoformat(),
-        "device": _serialize_devices((session.info.device,))[0],
-        "metadata": dict(session.info.metadata),
-    }
-
-    get_display_state = getattr(session, "get_display_state", None)
-    if callable(get_display_state):
-        display_state = await get_display_state()
-        payload["display"] = {
-            "width": display_state.size.width,
-            "height": display_state.size.height,
-            "rotation_quadrants": display_state.rotation_quadrants,
-        }
-
-    return payload
 
 
 def _write_payload(payload: object, *, as_json: bool, stdout: TextIO) -> None:
@@ -501,36 +186,6 @@ def _write_payload(payload: object, *, as_json: bool, stdout: TextIO) -> None:
             display_name = entry["display_name"] or device_id
             target_kind = entry["metadata"].get("adb.target_kind", "unknown")
             print(f"{device_id} | {display_name} | {target_kind}", file=stdout)
-        return
-
-    if isinstance(payload, dict) and "saved_path" in payload:
-        frame_payload = payload.get("frame")
-        size_payload = frame_payload.get("size") if isinstance(frame_payload, dict) else None
-        if not isinstance(frame_payload, dict) or not isinstance(size_payload, dict):
-            raise CliError("Capture payload is missing frame details.")
-        print(
-            f"Captured {payload['device_id']} to {payload['saved_path']} "
-            f"({size_payload['width']}x{size_payload['height']}, "
-            f"{frame_payload['pixel_format']}).",
-            file=stdout,
-        )
-        return
-
-    if isinstance(payload, dict) and "session_id" in payload:
-        device = payload["device"]
-        if not isinstance(device, dict):
-            raise CliError("Session payload is missing device details.")
-        print(f"Session: {payload['session_id']}", file=stdout)
-        print(f"Device: {device['device_id']}", file=stdout)
-        if payload.get("display") is not None:
-            display = payload["display"]
-            if not isinstance(display, dict):
-                raise CliError("Session payload is missing display details.")
-            print(
-                f"Display: {display['width']}x{display['height']} "
-                f"rotation={display['rotation_quadrants']}",
-                file=stdout,
-            )
         return
 
     print(json.dumps(payload, indent=2, sort_keys=True), file=stdout)

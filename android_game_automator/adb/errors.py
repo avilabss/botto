@@ -19,9 +19,5 @@ class AdbDisplayStateError(AdbBackendError):
     """Raised when orientation/display state cannot be determined."""
 
 
-class AdbFrameCaptureError(AdbBackendError):
-    """Raised when screenshot capture or decode fails."""
-
-
 class AdbSessionClosedError(AdbBackendError):
     """Raised when an operation is attempted on a closed session."""

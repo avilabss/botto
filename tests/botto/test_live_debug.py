@@ -5,35 +5,40 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 
-import botto.live as live_module
+import botto.live.overlay as overlay_module
 import pytest
 from android_game_automator.image import FrameImage
+from android_game_automator.scrcpy import DEFAULT_SCRCPY_MAX_FPS
 from android_game_automator.types import (
-    DeviceIdentity,
-    DeviceInfo,
     NormalizedPoint,
+    NormalizedRect,
     PixelFormat,
     Point,
-    SessionInfo,
-    Size,
+    Rect,
 )
 from botto.cli import run
+from botto.detection.models import BaseScreen, Evidence, Overlay, RecommendedAction, ScreenAnalysis
 from botto.live import LiveAnalysisSnapshot, render_debug_overlay, run_live_debug
-from botto.runner import DEFAULT_CLASH_PACKAGE
-from botto.screens import BaseScreen, Evidence, Overlay, RecommendedAction, ScreenAnalysis
 from PIL import Image
 
+from tests.botto.fakes import (
+    FakeAdbBackend,
+    FakeAdbSession,
+    FakeLiveSource,
+    FakeLiveSourceFactory,
+    FakePreviewWindow,
+    make_frame,
+)
 
-def test_live_debug_launches_default_package_and_starts_scrcpy_source() -> None:
+
+def test_debug_launches_default_package_and_starts_scrcpy_source() -> None:
     stdout = StringIO()
     stderr = StringIO()
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(frames=(make_frame("frame-1"),))
     source_factory = FakeLiveSourceFactory(source)
     preview = FakePreviewWindow(keys=(ord("q"),))
@@ -41,13 +46,9 @@ def test_live_debug_launches_default_package_and_starts_scrcpy_source() -> None:
 
     exit_code = run(
         [
-            "live-debug",
+            "debug",
             "--device",
             "emulator-5554",
-            "--max-fps",
-            "7",
-            "--analyze-every-seconds",
-            "1.5",
         ],
         backend_factory=lambda: backend,
         live_source_factory=source_factory,
@@ -61,8 +62,8 @@ def test_live_debug_launches_default_package_and_starts_scrcpy_source() -> None:
     assert stdout.getvalue() == ""
     assert stderr.getvalue() == ""
     assert backend.opened_device_ids == ["emulator-5554"]
-    assert session.launched_packages == [DEFAULT_CLASH_PACKAGE]
-    assert source_factory.created == [("emulator-5554", 7)]
+    assert session.launched_packages == ["com.supercell.clashofclans"]
+    assert source_factory.created == [("emulator-5554", DEFAULT_SCRCPY_MAX_FPS)]
     assert analyzer.frame_ids == ["frame-1"]
     assert source.start_calls == 1
     assert source.stop_calls == 1
@@ -72,25 +73,21 @@ def test_live_debug_launches_default_package_and_starts_scrcpy_source() -> None:
     assert [frame.frame_id for frame in preview.shown_frames] == ["frame-1"]
 
 
-def test_live_debug_skip_launch_keeps_current_screen() -> None:
+def test_debug_skip_launch_keeps_current_screen() -> None:
     stdout = StringIO()
     stderr = StringIO()
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(frames=(make_frame("frame-1"),))
     source_factory = FakeLiveSourceFactory(source)
     preview = FakePreviewWindow(keys=(27,))
 
     exit_code = run(
         [
-            "live-debug",
+            "debug",
             "--serial",
             "emulator-5554",
             "--skip-launch",
-            "--package",
-            "example.package",
-            "--window-title",
-            "Custom debug title",
         ],
         backend_factory=lambda: backend,
         live_source_factory=source_factory,
@@ -104,15 +101,15 @@ def test_live_debug_skip_launch_keeps_current_screen() -> None:
     assert stderr.getvalue() == ""
     assert backend.opened_device_ids == ["emulator-5554"]
     assert session.launched_packages == []
-    assert source_factory.created == [("emulator-5554", 30)]
-    assert preview.opened == ["Custom debug title"]
-    assert preview.closed == ["Custom debug title"]
+    assert source_factory.created == [("emulator-5554", DEFAULT_SCRCPY_MAX_FPS)]
+    assert preview.opened == ["Botto live debug"]
+    assert preview.closed == ["Botto live debug"]
     assert len(preview.shown_frames) == 1
 
 
 def test_live_debug_throttles_analysis_and_reuses_latest_result_between_frames() -> None:
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(
         frames=(make_frame("frame-1"), make_frame("frame-2"), make_frame("frame-3"))
     )
@@ -156,8 +153,8 @@ def passthrough_renderer(
 
 
 def test_live_debug_renders_newer_frames_while_slow_analysis_runs_single_flight() -> None:
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(
         frames=(make_frame("frame-1"), make_frame("frame-2"), make_frame("frame-3"))
     )
@@ -195,8 +192,8 @@ def test_live_debug_renders_newer_frames_while_slow_analysis_runs_single_flight(
 
 
 def test_live_debug_uses_latest_frame_without_consuming_stale_frame_queue() -> None:
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(
         frames=(make_frame("queued-stale-frame"),),
         latest_frames=(make_frame("latest-frame"),),
@@ -222,13 +219,11 @@ def test_live_debug_uses_latest_frame_without_consuming_stale_frame_queue() -> N
     assert source.frames_calls == 0
 
 
-def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis_from_cli_options(
+def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis(
     tmp_path: Path,
 ) -> None:
-    stdout = StringIO()
-    stderr = StringIO()
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(
         frames=(
             make_frame("frame-1", rgba=(1, 2, 3, 255)),
@@ -240,6 +235,23 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis_from_cli_option
         base_screen=BaseScreen.HOME_VILLAGE,
         overlay=Overlay.NONE,
         confidence=0.8,
+        evidence=(
+            Evidence(
+                kind="template",
+                label="attack_button",
+                confidence=0.93,
+                details={
+                    "bounds": Rect(left=1, top=2, width=3, height=4),
+                    "region": NormalizedRect(left=0.1, top=0.2, width=0.3, height=0.4),
+                    "phrases": ("Attack", "Shop"),
+                },
+            ),
+        ),
+        recommended_action=RecommendedAction(
+            label="tap_try_again",
+            tap_target=NormalizedPoint(x=0.5, y=0.88),
+            details={"overlay": Overlay.CONNECTION_LOST},
+        ),
     )
     analyzer = BlockingAnalyzer(analysis)
     preview = FakePreviewWindow(
@@ -247,37 +259,49 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis_from_cli_option
         wait_callbacks=(analyzer.wait_until_started_release_and_finish,),
     )
 
-    exit_code = run(
-        [
-            "live-debug",
-            "--device",
-            "emulator-5554",
-            "--skip-launch",
-            "--output-dir",
-            str(tmp_path),
-            "--run-name",
-            "live-run",
-        ],
-        backend_factory=lambda: backend,
-        live_source_factory=source_factory,
-        preview_window=preview,
-        screen_analyzer=analyzer,
-        stdout=stdout,
-        stderr=stderr,
+    asyncio.run(
+        run_live_debug(
+            device_id="emulator-5554",
+            launch=False,
+            artifact_root=tmp_path,
+            run_name="live-run",
+            backend=backend,
+            source_factory=source_factory,
+            preview_window=preview,
+            screen_analyzer=analyzer,
+        )
     )
 
     image_path = tmp_path / "live-run" / "images" / "live-debug-raw-000001.png"
     analysis_path = tmp_path / "live-run" / "json" / "live-debug-raw-000001.json"
-    assert exit_code == 0
-    assert stderr.getvalue() == ""
     assert image_path.is_file()
     assert analysis_path.is_file()
-    assert str(image_path) in stdout.getvalue()
-    assert str(analysis_path) in stdout.getvalue()
     with Image.open(image_path) as saved_image:
         assert saved_image.getpixel((0, 0)) == (40, 50, 60, 255)
     payload = json.loads(analysis_path.read_text(encoding="utf-8"))
-    assert payload["analysis"]["base_screen"] == "home_village"
+    assert payload["analysis"] == {
+        "base_screen": "home_village",
+        "overlay": "none",
+        "confidence": 0.8,
+        "evidence": [
+            {
+                "kind": "template",
+                "label": "attack_button",
+                "confidence": 0.93,
+                "text": None,
+                "details": {
+                    "bounds": {"left": 1, "top": 2, "width": 3, "height": 4},
+                    "region": {"left": 0.1, "top": 0.2, "width": 0.3, "height": 0.4},
+                    "phrases": ["Attack", "Shop"],
+                },
+            }
+        ],
+        "recommended_action": {
+            "label": "tap_try_again",
+            "tap_target": {"x": 0.5, "y": 0.88},
+            "details": {"overlay": "connection_lost"},
+        },
+    }
     assert payload["analysis_frame_id"] == "frame-1"
     assert payload["frame"]["frame_id"] == "frame-2"
     manifest_entries = [
@@ -293,8 +317,8 @@ def test_live_debug_s_hotkey_saves_raw_frame_and_latest_analysis_from_cli_option
 def test_live_debug_d_hotkey_saves_annotated_frame_and_latest_analysis(
     tmp_path: Path,
 ) -> None:
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(
         frames=(
             make_frame("frame-1", rgba=(1, 2, 3, 255)),
@@ -342,15 +366,16 @@ def test_live_debug_d_hotkey_saves_annotated_frame_and_latest_analysis(
         "frame-2-debug",
         "frame-3-debug",
     ]
-    assert session.input_actions == []
     assert session.recovery_actions == []
+    assert not hasattr(session, "tap")
+    assert not hasattr(session, "swipe")
 
 
 def test_live_debug_hotkey_skips_analysis_json_when_no_snapshot_exists(
     tmp_path: Path,
 ) -> None:
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
     source_factory = FakeLiveSourceFactory(source)
     analyzer = BlockingAnalyzer()
@@ -377,8 +402,9 @@ def test_live_debug_hotkey_skips_analysis_json_when_no_snapshot_exists(
     assert image_path.is_file()
     assert not (tmp_path / "no-analysis-run" / "json").exists()
     assert source.latest_frame_calls == 2
-    assert session.input_actions == []
     assert session.recovery_actions == []
+    assert not hasattr(session, "tap")
+    assert not hasattr(session, "swipe")
 
 
 def test_debug_status_lines_indicate_analysis_running_with_timing() -> None:
@@ -394,10 +420,10 @@ def test_debug_status_lines_indicate_analysis_running_with_timing() -> None:
         frame_id="frame-1",
     )
 
-    assert live_module._debug_status_lines(None, now=1.0, analysis_running=True) == (
+    assert overlay_module._debug_status_lines(None, now=1.0, analysis_running=True) == (
         "analysis: running",
     )
-    lines = live_module._debug_status_lines(snapshot, now=2.0, analysis_running=True)
+    lines = overlay_module._debug_status_lines(snapshot, now=2.0, analysis_running=True)
 
     assert lines[-1] == "analysis age: 1.0s  took: 0.25s  running"
 
@@ -409,7 +435,7 @@ def test_debug_overlay_status_includes_frame_size(monkeypatch: pytest.MonkeyPatc
         _ = bgr
         captured_lines.append(lines)
 
-    monkeypatch.setattr(live_module, "_draw_status_lines", capture_status_lines)
+    monkeypatch.setattr(overlay_module, "_draw_status_lines", capture_status_lines)
 
     render_debug_overlay(
         make_frame("frame-1", width=108, height=50),
@@ -472,8 +498,8 @@ def test_debug_overlay_renderer_annotates_copy_with_evidence_and_target() -> Non
 def test_live_debug_exits_on_q_or_escape_cleans_up_background_work_and_remains_read_only(
     exit_key: int,
 ) -> None:
-    session = FakeSession(device_id="emulator-5554")
-    backend = FakeBackend(session=session)
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
     source = FakeLiveSource(frames=(make_frame("1"), make_frame("2"), make_frame("3")))
     source_factory = FakeLiveSourceFactory(source)
     analysis = ScreenAnalysis(
@@ -492,7 +518,7 @@ def test_live_debug_exits_on_q_or_escape_cleans_up_background_work_and_remains_r
     )
 
     exit_code = run(
-        ["live-debug", "--device", "emulator-5554", "--skip-launch"],
+        ["debug", "--device", "emulator-5554", "--skip-launch"],
         backend_factory=lambda: backend,
         live_source_factory=source_factory,
         preview_window=preview,
@@ -501,39 +527,13 @@ def test_live_debug_exits_on_q_or_escape_cleans_up_background_work_and_remains_r
 
     assert exit_code == 0
     assert [frame.frame_id for frame in preview.shown_frames] == ["1"]
-    assert session.input_actions == []
     assert session.recovery_actions == []
+    assert not hasattr(session, "tap")
+    assert not hasattr(session, "swipe")
     assert analyzer.frame_ids == ["1"]
     assert analyzer.finished.is_set()
     assert source.stop_calls == 1
     assert session.closed is True
-
-
-def make_frame(
-    frame_id: str = "frame-1",
-    *,
-    width: int = 40,
-    height: int = 30,
-    rgba: tuple[int, int, int, int] = (1, 2, 3, 255),
-) -> FrameImage:
-    return FrameImage(
-        size=Size(width=width, height=height),
-        pixel_format=PixelFormat.RGBA32,
-        data=bytes(rgba) * width * height,
-        captured_at=datetime.now(UTC),
-        frame_id=frame_id,
-    )
-
-
-def make_device_info(device_id: str) -> DeviceInfo:
-    return DeviceInfo(
-        identity=DeviceIdentity(
-            backend_name="adb",
-            device_id=device_id,
-            display_name=device_id,
-        ),
-        metadata={"adb.target_kind": "emulator"},
-    )
 
 
 class FakeAnalyzer:
@@ -644,133 +644,3 @@ class SolidDebugRenderer:
             height=frame.height,
             rgba=self._rgba,
         )
-
-
-class FakeBackend:
-    def __init__(self, *, session: FakeSession) -> None:
-        self._session = session
-        self.opened_device_ids: list[str | None] = []
-
-    async def list_devices(self) -> tuple[DeviceInfo, ...]:
-        return (self._session.info.device,)
-
-    async def open_session(self, device_id: str | None = None) -> FakeSession:
-        self.opened_device_ids.append(device_id)
-        return self._session
-
-
-class FakeSession:
-    def __init__(self, *, device_id: str) -> None:
-        self._info = SessionInfo(
-            session_id=f"adb:{device_id}:live-debug",
-            device=make_device_info(device_id),
-            started_at=datetime.now(UTC),
-            metadata={"adb.target_kind": "emulator"},
-        )
-        self.closed = False
-        self.launched_packages: list[str] = []
-        self.input_actions: list[str] = []
-        self.recovery_actions: list[str] = []
-
-    @property
-    def info(self) -> SessionInfo:
-        return self._info
-
-    async def close(self) -> None:
-        self.closed = True
-
-    async def launch_app(self, package_name: str) -> None:
-        self.launched_packages.append(package_name)
-
-    async def close_app(self, package_name: str) -> None:
-        self.recovery_actions.append(f"close_app:{package_name}")
-
-    async def tap(self, *args: object, **kwargs: object) -> None:
-        _ = args, kwargs
-        self.input_actions.append("tap")
-
-    async def swipe(self, *args: object, **kwargs: object) -> None:
-        _ = args, kwargs
-        self.input_actions.append("swipe")
-
-
-class FakeLiveSource:
-    def __init__(
-        self,
-        *,
-        frames: tuple[FrameImage, ...],
-        latest_frames: tuple[FrameImage, ...] | None = None,
-        fail_on_frames: bool = False,
-    ) -> None:
-        self._frames = frames
-        self._latest_frames = latest_frames if latest_frames is not None else frames
-        self._latest_frame_index = 0
-        self._fail_on_frames = fail_on_frames
-        self.start_calls = 0
-        self.stop_calls = 0
-        self.latest_frame_calls = 0
-        self.frames_calls = 0
-
-    def start(self) -> None:
-        self.start_calls += 1
-
-    def stop(self) -> None:
-        self.stop_calls += 1
-
-    def latest_frame(self) -> FrameImage | None:
-        self.latest_frame_calls += 1
-        if self._latest_frame_index >= len(self._latest_frames):
-            return None
-        frame = self._latest_frames[self._latest_frame_index]
-        self._latest_frame_index += 1
-        return frame
-
-    def frames(self) -> Iterator[FrameImage]:
-        self.frames_calls += 1
-        if self._fail_on_frames:
-            raise AssertionError("live-debug must not consume queued frames for display")
-        yield from self._frames
-
-
-class FakeLiveSourceFactory:
-    def __init__(self, source: FakeLiveSource) -> None:
-        self._source = source
-        self.created: list[tuple[str, int]] = []
-
-    def __call__(self, *, serial: str, max_fps: int) -> FakeLiveSource:
-        self.created.append((serial, max_fps))
-        return self._source
-
-
-class FakePreviewWindow:
-    def __init__(
-        self,
-        *,
-        keys: tuple[int, ...],
-        wait_callbacks: tuple[Callable[[], None] | None, ...] = (),
-    ) -> None:
-        self._keys = list(keys)
-        self._wait_callbacks = list(wait_callbacks)
-        self.opened: list[str] = []
-        self.closed: list[str] = []
-        self.shown_frames: list[FrameImage] = []
-
-    def open(self, window_title: str) -> None:
-        self.opened.append(window_title)
-
-    def show(self, window_title: str, frame: FrameImage) -> None:
-        _ = window_title
-        self.shown_frames.append(frame)
-
-    def wait_key(self, delay_ms: int) -> int:
-        _ = delay_ms
-        if self._wait_callbacks:
-            callback = self._wait_callbacks.pop(0)
-            if callback is not None:
-                callback()
-        if self._keys:
-            return self._keys.pop(0)
-        return -1
-
-    def close(self, window_title: str) -> None:
-        self.closed.append(window_title)

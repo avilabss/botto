@@ -28,8 +28,10 @@ def test_botto_module_entrypoint_help() -> None:
     )
 
     assert completed.returncode == 0
-    assert "live-preview" in completed.stdout
-    assert "live-debug" in completed.stdout
+    assert "devices" in completed.stdout
+    assert "debug" in completed.stdout
+    assert "live-preview" not in completed.stdout
+    assert "live-debug" not in completed.stdout
 
 
 def test_botto_module_entrypoint_version() -> None:

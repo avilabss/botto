@@ -1,49 +1,51 @@
 # botto
 
-This repository now separates the reusable SDK from the future game bot app:
+Botto is a scrcpy-first Clash of Clans debug/detection app plus a small reusable
+Python SDK for Android device sessions, live frames, image analysis, OCR, and
+debug artifacts.
 
-- `android_game_automator` is the reusable Python SDK for Android game automation.
-- `botto` is a small reference app/CLI built on that SDK.
+- `botto` lists connected ADB devices and runs a read-only live debug view for
+  Clash of Clans.
+- `android_game_automator` provides reusable SDK primitives: typed geometry and
+  device models, `FrameImage`, scrcpy frame streaming, ROI-first vision/OCR
+  helpers, artifact storage, and minimal ADB session/app lifecycle helpers.
 
 ## Current scope
 
-- Milestone focus: **ADB-only foundation**.
-- Implemented: shared data types plus ADB-backed device discovery,
-  async sessions, screenshot capture, app lifecycle helpers, direct input
-  execution with common `AndroidKey` enums, viewport-aware coordinate mapping,
-  best-effort ADB multi-swipe/pinch helpers,
-  ROI-first template and ORB feature matching, OCR-ready vision helpers, and
-  run-organized artifact output.
-- `botto` reference flows: list devices, inspect a live session, and capture a screenshot to a PNG file.
-- Not implemented yet: actual Clash of Clans automation logic.
+Implemented today:
 
-## Quickstart prerequisites
+- ADB-backed device discovery, async sessions, display state, and app
+  launch/close lifecycle helpers.
+- scrcpy-backed live frame capture as `FrameImage` objects.
+- Read-only Clash screen detection in `botto.detection`.
+- Live debug display in `botto.live` with throttled detector annotations and
+  artifact hotkeys.
 
-- Install Android Debug Bridge (`adb`) and make sure it is available on your `PATH`.
-  The SDK uses `adbutils-async`, but it still depends on a working local ADB
-  installation/server.
-- Before using the SDK or `botto`, verify ADB and device discovery:
+Botto does not currently implement gameplay automation.
+
+## Prerequisites
+
+- Install Android Debug Bridge (`adb`) and make sure it is available on your
+  `PATH`. The project uses ADB to discover devices and let scrcpy connect to
+  them.
+- Verify your emulator or USB device is visible and in the `device` state:
 
   ```sh
   adb version
   adb devices -l
   ```
 
-- `adb devices -l` should list your emulator or USB device as `device`. If the
-  command is missing or the device is not listed, finish ADB setup first.
-
 ## Quick SDK example
 
-For one-off scripts, create an ADB backend and open an async session. When one
-usable ADB device is connected, `open_session()` selects it automatically. This
-launches Clash of Clans, captures a screenshot image, saves it locally, and
-closes the app without tapping or swiping in-game:
+This launches Clash, reads one live scrcpy frame, saves it as an artifact, and
+closes the app:
 
 ```python
 import asyncio
 
 from android_game_automator.adb import AdbDeviceBackend
 from android_game_automator.artifacts import ArtifactStore
+from android_game_automator.scrcpy import ScrcpyFrameSource
 
 
 CLASH_PACKAGE = "com.supercell.clashofclans"
@@ -51,13 +53,16 @@ CLASH_PACKAGE = "com.supercell.clashofclans"
 
 async def main() -> None:
     artifacts = ArtifactStore(".botto-artifacts")
-
     backend = AdbDeviceBackend()
+
     async with await backend.open_session() as session:
         await session.launch_app(CLASH_PACKAGE)
         try:
-            image = await session.screenshot()
-            saved_path = artifacts.save_image("clash-of-clans", image)
+            serial = session.info.device.identity.device_id
+            with ScrcpyFrameSource(serial=serial) as source:
+                image = source.wait_for_frame(timeout=5.0)
+
+            saved_path = artifacts.save_image("clash-live-frame", image)
             print(saved_path)
         finally:
             await session.close_app(CLASH_PACKAGE)
@@ -66,41 +71,42 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Each `ArtifactStore` instance writes all saves to one run directory, named like
+Each `ArtifactStore` writes to one run directory, named like
 `YYYYMMDD-HHMMSS-xxxxxxxx` by default, such as
-`.botto-artifacts/<run>/images/clash-of-clans.png`. Construct a new store
-without a `run_name` to start a new default run. The run-local `manifest.jsonl`
-records artifact paths relative to the artifact root, including the run folder.
-See `quick_run.py` for the same launch/capture/save/close flow as a local
-learning harness, and `docs/android-game-automator-sdk.md` for template
-matching, ORB feature matching, OCR, and advanced API examples.
+`.botto-artifacts/<run>/images/clash-live-frame.png`. The run-local
+`manifest.jsonl` records saved artifact paths relative to the artifact root.
 
 ## Module layout
 
-- `android_game_automator.types` — shared device, geometry, pixel, match, and OCR block models.
-- `android_game_automator.image` — frame images, ROI utilities, and pixel/color probes.
+- `android_game_automator.types` — shared device, geometry, pixel, match, and
+  OCR block models.
+- `android_game_automator.image` — `FrameImage`, ROI utilities, and pixel/color
+  probes.
+- `android_game_automator.scrcpy` — scrcpy live frame source and frame
+  conversion helpers.
 - `android_game_automator.vision` — template and ORB feature matching helpers.
 - `android_game_automator.ocr` — OCR helpers.
-- `android_game_automator.artifacts` — simple local artifact persistence.
-- `android_game_automator.adb` — ADB discovery/session/input/capture layer.
-- `botto` — reference CLI that exercises the SDK from an app boundary.
+- `android_game_automator.artifacts` — local artifact persistence.
+- `android_game_automator.adb` — minimal ADB device discovery, sessions,
+  display state, and app lifecycle helpers.
+- `botto.detection` — read-only Clash screen/overlay analysis.
+- `botto.live` — scrcpy live debug loop, overlay rendering, preview window, and
+  artifact hotkeys.
+- `botto.cli` — CLI parser and command dispatch.
 
-## Reference CLI
+## CLI
 
-- `python -m botto` shows the reference CLI help.
-- `python -m botto devices` lists adb devices through `AdbDeviceBackend`.
-- `python -m botto session --device <serial>` inspects a live session and current display metadata.
-- `python -m botto capture --device <serial>` captures a screenshot and saves it under `.botto-artifacts/<run>/images/device-capture.png` by default.
+- `botto devices` — list usable ADB devices.
+- `botto debug [--serial SERIAL|--device SERIAL] [--skip-launch]` — open the
+  scrcpy live debug view. By default it launches Clash first; `--skip-launch`
+  debugs the current screen.
 
-## ADB input note
+Live debug hotkeys:
 
-`AdbDeviceSession.multi_swipe(...)`, `pinch_in(...)`, and `pinch_out(...)` issue
-concurrent ADB `input swipe` commands as best-effort multi-touch. Plain ADB does
-not guarantee true multi-touch on every device or game.
-
-## Entrypoint
-
-- `python -m botto` runs the Botto reference CLI.
+- `s` — save the current raw frame and latest analysis JSON when available.
+- `d` — save the current debug/annotated frame and latest analysis JSON when
+  available.
+- `q` or Esc — exit.
 
 ## SDK usage docs
 

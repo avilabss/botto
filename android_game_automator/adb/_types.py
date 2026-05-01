@@ -5,19 +5,6 @@ from __future__ import annotations
 from typing import Protocol
 
 
-class AdbConnectionLike(Protocol):
-    """Subset of adb connection operations used for raw reads."""
-
-    async def send_command(self, cmd: str) -> None:
-        """Send an adb service command over an opened transport."""
-
-    async def read_until_close(self, encoding: str | None = "utf-8") -> str | bytes:
-        """Read transport output until the adb connection closes."""
-
-    async def close(self) -> None:
-        """Close the underlying adb transport."""
-
-
 class AdbServerConnectionLike(Protocol):
     """Subset of adb server connection operations used for host protocol queries."""
 
@@ -31,13 +18,6 @@ class AdbServerConnectionLike(Protocol):
         """Close the underlying adb server connection."""
 
 
-class AdbListedDevice(Protocol):
-    """Subset of adbutils listed-device info used by this backend."""
-
-    serial: str
-    state: str
-
-
 class AdbDeviceHandle(Protocol):
     """Subset of adbutils device operations used by this backend."""
 
@@ -48,9 +28,6 @@ class AdbDeviceHandle(Protocol):
 
     async def shell(self, cmdargs: str, encoding: str | None = "utf-8") -> str | bytes:
         """Execute a shell command and return output."""
-
-    async def open_transport(self, command: str | None = None) -> AdbConnectionLike:
-        """Open a raw adb transport for device-scoped commands."""
 
 
 class AdbClientLike(Protocol):
