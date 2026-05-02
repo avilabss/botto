@@ -1,0 +1,25 @@
+[[actions]]
+type = "cast_spell_on_detected_targets"
+spell = "lightning"
+targets = ["air_defense"]
+casts_per_target = 3
+
+[[actions]]
+type = "deploy_unit_around_perimeter"
+unit = "super_minion"
+points_per_side = 4
+waves = 1
+
+[[actions]]
+type = "deploy_group_on_one_side"
+group = "cc_and_heroes"
+side = "auto"
+
+[[actions]]
+type = "activate_hero_abilities"
+heroes = [
+  "barbarian_king",
+  "archer_queen",
+  "grand_warden",
+  "royal_champion",
+]

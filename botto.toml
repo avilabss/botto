@@ -1,0 +1,13 @@
+[attack]
+strategy = "mass-super-minion"
+
+[attack.resources]
+min_gold = 500000
+min_elixir = 500000
+min_dark_elixir = 5000
+
+[attack.search]
+max_searches = 50
+
+[attack.battle]
+resource_stall_seconds = 20

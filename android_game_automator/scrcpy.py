@@ -15,7 +15,7 @@ from py_scrcpy_sdk import ScrcpyClient as _PyScrcpyClient  # type: ignore[import
 from py_scrcpy_sdk import ScrcpyConfig as _PyScrcpyConfig  # type: ignore[import-untyped]
 
 from android_game_automator.image import FrameImage
-from android_game_automator.types import PixelFormat, Size
+from android_game_automator.types import NormalizedPoint, PixelFormat, Point, Size, Viewport
 
 DEFAULT_SCRCPY_MAX_FPS = 30
 
@@ -38,14 +38,30 @@ class ScrcpySourceConfig:
 
 
 class ScrcpyClient(Protocol):
-    """Subset of py-scrcpy-sdk's client API used for read-only frames."""
+    """Subset of py-scrcpy-sdk's client API used for frames and input."""
 
     latest_frame: ScrcpyFrameArray | None
     frame_counter: int
 
+    @property
+    def frame_size(self) -> tuple[int, int]: ...
+
     def start(self) -> None: ...
 
     def stop(self) -> None: ...
+
+    def tap(self, x: int, y: int, *, hold_seconds: float = 0.05) -> None: ...
+
+    def swipe(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        duration_ms: int = 300,
+        steps: int = 12,
+    ) -> None: ...
 
     def get_frame(self, *, timeout: float | None = None, copy: bool = True) -> ScrcpyFrameArray: ...
 
@@ -61,7 +77,7 @@ class ScrcpyClientFactory(Protocol):
 
 
 class ScrcpyFrameSource:
-    """Read-only scrcpy frame source that exposes SDK ``FrameImage`` objects."""
+    """scrcpy frame source that exposes SDK ``FrameImage`` objects and input hooks."""
 
     def __init__(
         self,
@@ -176,6 +192,83 @@ class ScrcpyFrameSource:
             result = callback(frame)
             if stop_on_false and result is False:
                 break
+
+    @property
+    def action_surface_size(self) -> Size:
+        """Return the current scrcpy frame size used for input mapping."""
+
+        return self._current_frame_size()
+
+    def tap(
+        self,
+        point: NormalizedPoint,
+        *,
+        hold_seconds: float = 0.05,
+    ) -> Point:
+        """Map a normalized point to the scrcpy frame and tap it."""
+
+        pixel = self._map_action_point(point)
+        self.tap_pixels(pixel, hold_seconds=hold_seconds)
+        return pixel
+
+    def swipe(
+        self,
+        start: NormalizedPoint,
+        end: NormalizedPoint,
+        *,
+        duration_ms: int = 300,
+        steps: int = 12,
+    ) -> tuple[Point, Point]:
+        """Map normalized endpoints to the scrcpy frame and swipe between them."""
+
+        start_pixel = self._map_action_point(start)
+        end_pixel = self._map_action_point(end)
+        self.swipe_pixels(
+            start_pixel,
+            end_pixel,
+            duration_ms=duration_ms,
+            steps=steps,
+        )
+        return start_pixel, end_pixel
+
+    def tap_pixels(self, point: Point, *, hold_seconds: float = 0.05) -> None:
+        """Tap an already-mapped scrcpy frame pixel."""
+
+        client = self._require_started_client()
+        client.tap(point.x, point.y, hold_seconds=hold_seconds)
+
+    def swipe_pixels(
+        self,
+        start: Point,
+        end: Point,
+        *,
+        duration_ms: int = 300,
+        steps: int = 12,
+    ) -> None:
+        """Swipe between already-mapped scrcpy frame pixels."""
+
+        client = self._require_started_client()
+        client.swipe(
+            start.x,
+            start.y,
+            end.x,
+            end.y,
+            duration_ms=duration_ms,
+            steps=steps,
+        )
+
+    def _map_action_point(self, point: NormalizedPoint) -> Point:
+        return Viewport(self._current_frame_size()).map_point(point)
+
+    def _current_frame_size(self) -> Size:
+        client = self._require_started_client()
+        try:
+            width, height = client.frame_size
+        except Exception as exc:
+            raise RuntimeError(
+                "scrcpy frame size is not available; wait for the first frame before sending input"
+            ) from exc
+        return Size(width=width, height=height)
 
     def _require_started_client(self) -> ScrcpyClient:
         if self._client is None or not self._started:

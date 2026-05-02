@@ -21,6 +21,14 @@ from android_game_automator.ocr import warm_up_ocr
 from android_game_automator.types import DeviceInfo
 
 from android_game_automator.adb import AdbDeviceBackend
+from botto.automation.config import (
+    BottoConfig,
+    BottoConfigError,
+    LoadedBottoConfig,
+    load_botto_config,
+)
+from botto.automation.controller import AutomationController
+from botto.automation.strategy import AttackStrategy, StrategyConfigError, load_attack_strategy
 from botto.detection import BaseScreen, Overlay, analyze_screen
 from botto.live import (
     DebugPreviewBackend,
@@ -184,16 +192,26 @@ async def _run_command(
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
-    backend = backend_factory()
-
     if args.command == "devices":
+        backend = backend_factory()
         devices = await backend.list_devices()
         _write_payload(_serialize_devices(devices), as_json=args.json, stdout=stdout)
         return 0
 
     if args.command == "run":
+        try:
+            loaded_config = load_botto_config()
+            loaded_strategy = load_attack_strategy(
+                loaded_config.config.attack.strategy,
+                base_dir=loaded_config.path.parent,
+            )
+        except (BottoConfigError, StrategyConfigError) as exc:
+            raise CliError(str(exc)) from exc
+
         with _configured_run_logging(verbosity=args.verbose, stderr=stderr) as logging_context:
             try:
+                _log_loaded_config(loaded_config)
+                backend = backend_factory()
                 resolved_screen_analyzer = (
                     screen_analyzer if screen_analyzer is not None else analyze_screen
                 )
@@ -217,6 +235,10 @@ async def _run_command(
                         source_factory=frame_source_factory,
                         preview_window=preview_window,
                         screen_analyzer=resolved_screen_analyzer,
+                        runtime_state_hook=AutomationController(
+                            loaded_config.config,
+                            strategy=loaded_strategy.strategy,
+                        ),
                     )
                 else:
                     await _run_headless(
@@ -225,12 +247,28 @@ async def _run_command(
                         backend=backend,
                         source_factory=frame_source_factory,
                         screen_analyzer=resolved_screen_analyzer,
+                        config=loaded_config.config,
+                        strategy=loaded_strategy.strategy,
                     )
             except ValueError as exc:
                 raise CliError(str(exc)) from exc
         return 0
 
     raise CliError(f"Unsupported command {args.command!r}")
+
+
+def _log_loaded_config(loaded_config: LoadedBottoConfig) -> None:
+    effective_values = ", ".join(
+        f"{name}={_format_config_value(value)}"
+        for name, value in loaded_config.config.effective_values().items()
+    )
+    _LOGGER.info("Loaded Botto config %s: %s", loaded_config.path, effective_values)
+
+
+def _format_config_value(value: str | int | float) -> str:
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
 
 
 def _serialize_devices(devices: tuple[DeviceInfo, ...]) -> list[dict[str, Any]]:
@@ -273,6 +311,8 @@ async def _run_headless(
     backend: DebugPreviewBackend,
     source_factory: DebugPreviewFrameSourceFactory | None,
     screen_analyzer: DebugPreviewScreenAnalyzer,
+    config: BottoConfig,
+    strategy: AttackStrategy | None = None,
 ) -> None:
     shutdown_requested = False
     shutdown_logged = False
@@ -286,6 +326,7 @@ async def _run_headless(
         _LOGGER.info("Launched Clash of Clans")
 
     last_state: BaseScreen | Overlay | None = None
+    controller = AutomationController(config, strategy=strategy)
 
     def handle_runtime_state(state: RuntimeLoopState) -> bool:
         nonlocal last_state, shutdown_logged
@@ -298,16 +339,14 @@ async def _run_headless(
 
         snapshot = state.analysis_snapshot
         if snapshot is None:
-            return True
+            return controller(state)
 
         analysis = snapshot.analysis
         current_state = _headless_state_key(analysis.base_screen, analysis.overlay)
-        if current_state == last_state:
-            return True
-
-        last_state = current_state
-        _LOGGER.info(_headless_state_message(analysis.base_screen, analysis.overlay))
-        return True
+        if current_state != last_state:
+            last_state = current_state
+            _LOGGER.info(_headless_state_message(analysis.base_screen, analysis.overlay))
+        return controller(state)
 
     _LOGGER.debug("Starting headless runtime")
     try:

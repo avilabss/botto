@@ -53,6 +53,7 @@ DebugPreviewScreenAnalyzer = RuntimeScreenAnalyzer
 
 type ClockFn = Callable[[], float]
 type StatusWriter = Callable[[str], None]
+type DebugPreviewRuntimeStateHook = Callable[[RuntimeLoopState], bool]
 
 
 class DebugOverlayRenderer(Protocol):
@@ -84,6 +85,7 @@ async def run_debug_preview(
     screen_analyzer: DebugPreviewScreenAnalyzer | None = None,
     overlay_renderer: DebugOverlayRenderer | None = None,
     status_writer: StatusWriter | None = None,
+    runtime_state_hook: DebugPreviewRuntimeStateHook | None = None,
     clock: ClockFn = monotonic,
 ) -> None:
     """Display scrcpy frames with throttled read-only detector annotations."""
@@ -211,6 +213,10 @@ async def run_debug_preview(
             session_info=state.session_info,
             now=frame_time,
         )
+        if runtime_state_hook is not None and not runtime_state_hook(state):
+            _LOGGER.debug("Debug preview runtime hook requested stop")
+            close_window_if_open()
+            return False
         return True
 
     try:
@@ -239,6 +245,7 @@ __all__ = [
     "DebugPreviewBackend",
     "DebugPreviewFrameSource",
     "DebugPreviewFrameSourceFactory",
+    "DebugPreviewRuntimeStateHook",
     "DebugPreviewScreenAnalyzer",
     "DebugPreviewSession",
     "DebugOverlayRenderer",

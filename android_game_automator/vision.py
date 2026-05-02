@@ -38,6 +38,14 @@ class FeatureMatch:
             raise ValueError("match_count must be > 0")
 
 
+@dataclass(frozen=True, slots=True)
+class _TemplateMatchCandidate:
+    bounds: Rect
+    confidence: float
+    scale: float
+    rotation: float
+
+
 def find_template(
     source: ImageInput,
     template: ImageInput,
@@ -76,6 +84,48 @@ def find_template(
     if match is None or match.confidence < resolved_min_confidence:
         return None
     return match
+
+
+def find_template_matches(
+    source: ImageInput,
+    template: ImageInput,
+    *,
+    region: ScreenRect | None = None,
+    min_confidence: float = 0.9,
+    threshold: float | None = None,
+    scales: Iterable[float] = (1.0,),
+    rotations: Iterable[float] = (0.0,),
+    alpha_threshold: int = 16,
+    max_matches: int = 10,
+) -> tuple[Match, ...]:
+    """Return conservative non-overlapping template matches above the threshold."""
+
+    resolved_min_confidence = _resolve_min_confidence(min_confidence, threshold)
+    resolved_scales = _normalize_scales(scales)
+    resolved_rotations = _normalize_rotations(rotations)
+    resolved_alpha_threshold = _normalize_alpha_threshold(alpha_threshold)
+    resolved_max_matches = _normalize_max_matches(max_matches)
+    source_image = _coerce_image(source, name="source")
+    template_image = _coerce_image(template, name="template")
+    template_mask = _template_alpha_mask(template_image, alpha_threshold=resolved_alpha_threshold)
+    if template_mask is not None:
+        _validate_visible_alpha_mask(template_mask)
+    search_region = resolve_region(region, Viewport(surface_size=source_image.size))
+
+    candidates = _match_template_candidates(
+        source_image,
+        search_region,
+        template_image,
+        template_mask=template_mask,
+        min_confidence=resolved_min_confidence,
+        scales=resolved_scales,
+        rotations=resolved_rotations,
+        max_candidates=resolved_max_matches,
+    )
+    return _select_non_overlapping_template_matches(
+        candidates,
+        max_matches=resolved_max_matches,
+    )
 
 
 def find_feature_match(
@@ -135,6 +185,12 @@ def _normalize_alpha_threshold(alpha_threshold: int) -> int:
     if not 0 <= alpha_threshold <= 255:
         raise ValueError("alpha_threshold must be within [0, 255]")
     return alpha_threshold
+
+
+def _normalize_max_matches(max_matches: int) -> int:
+    if isinstance(max_matches, bool) or not isinstance(max_matches, int) or max_matches <= 0:
+        raise ValueError("max_matches must be a positive integer")
+    return max_matches
 
 
 def _normalize_scales(scales: Iterable[float]) -> tuple[float, ...]:
@@ -238,6 +294,64 @@ def _match_template(
         scale=best_scale,
         rotation=best_rotation,
     )
+
+
+def _match_template_candidates(
+    source: FrameImage,
+    search_region: Rect,
+    template: FrameImage,
+    *,
+    template_mask: GrayImage | None,
+    min_confidence: float,
+    scales: tuple[float, ...],
+    rotations: tuple[float, ...],
+    max_candidates: int,
+) -> tuple[_TemplateMatchCandidate, ...]:
+    search_image = source.crop(search_region)
+    search_array = _frame_image_to_grayscale_array(search_image)
+    template_array = _frame_image_to_grayscale_array(template)
+
+    candidates: list[_TemplateMatchCandidate] = []
+    for scale in scales:
+        scaled_template = _scaled_template_array(template_array, scale)
+        scaled_mask = (
+            _scaled_template_array(template_mask, scale) if template_mask is not None else None
+        )
+        for rotation in rotations:
+            transformed_template = _rotated_template_array(scaled_template, rotation)
+            transformed_mask = (
+                _rotated_template_array(scaled_mask, rotation) if scaled_mask is not None else None
+            )
+            if (
+                transformed_mask is not None
+                and _visible_mask_pixel_count(transformed_mask) < _MIN_VISIBLE_ALPHA_PIXELS
+            ):
+                continue
+            template_height, template_width = transformed_template.shape[:2]
+            if template_width > search_region.width or template_height > search_region.height:
+                continue
+
+            match_result = _template_match_result(
+                search_array,
+                transformed_template,
+                template_mask=transformed_mask,
+            )
+            if match_result is None:
+                continue
+            candidates.extend(
+                _template_candidates_from_result(
+                    match_result,
+                    search_region=search_region,
+                    template_width=template_width,
+                    template_height=template_height,
+                    min_confidence=min_confidence,
+                    scale=scale,
+                    rotation=rotation,
+                    max_candidates=max_candidates,
+                )
+            )
+
+    return tuple(candidates)
 
 
 def _match_features(
@@ -489,6 +603,26 @@ def _best_template_match(
     *,
     template_mask: GrayImage | None,
 ) -> tuple[float, Point] | None:
+    match_result = _template_match_result(
+        search_image,
+        template_image,
+        template_mask=template_mask,
+    )
+    if match_result is None:
+        return None
+    min_value, _, min_location, _ = cv2.minMaxLoc(match_result)
+    if template_mask is not None and not math.isfinite(min_value):
+        return None
+    confidence = max(0.0, min(1.0, 1.0 - min_value))
+    return confidence, Point(x=min_location[0], y=min_location[1])
+
+
+def _template_match_result(
+    search_image: GrayImage,
+    template_image: GrayImage,
+    *,
+    template_mask: GrayImage | None,
+) -> npt.NDArray[Any] | None:
     if template_mask is None:
         match_result = cv2.matchTemplate(search_image, template_image, cv2.TM_SQDIFF_NORMED)
     else:
@@ -504,11 +638,111 @@ def _best_template_match(
             return None
         match_result = match_result.copy()
         match_result[~finite_values] = np.inf
-    min_value, _, min_location, _ = cv2.minMaxLoc(match_result)
-    if template_mask is not None and not math.isfinite(min_value):
-        return None
-    confidence = max(0.0, min(1.0, 1.0 - min_value))
-    return confidence, Point(x=min_location[0], y=min_location[1])
+    return cast(npt.NDArray[Any], match_result)
 
 
-__all__ = ["FeatureMatch", "find_feature_match", "find_template"]
+def _template_candidates_from_result(
+    match_result: npt.NDArray[Any],
+    *,
+    search_region: Rect,
+    template_width: int,
+    template_height: int,
+    min_confidence: float,
+    scale: float,
+    rotation: float,
+    max_candidates: int,
+) -> tuple[_TemplateMatchCandidate, ...]:
+    candidates: list[_TemplateMatchCandidate] = []
+    remaining_result = match_result.copy()
+    for _ in range(max_candidates):
+        min_value, _, min_location, _ = cv2.minMaxLoc(remaining_result)
+        if not math.isfinite(min_value):
+            break
+        confidence = max(0.0, min(1.0, 1.0 - min_value))
+        if confidence < min_confidence:
+            break
+
+        offset = Point(x=min_location[0], y=min_location[1])
+        candidates.append(
+            _TemplateMatchCandidate(
+                bounds=Rect(
+                    left=search_region.left + offset.x,
+                    top=search_region.top + offset.y,
+                    width=template_width,
+                    height=template_height,
+                ),
+                confidence=confidence,
+                scale=scale,
+                rotation=rotation,
+            )
+        )
+        _suppress_overlapping_template_offsets(
+            remaining_result,
+            offset=offset,
+            template_width=template_width,
+            template_height=template_height,
+        )
+    return tuple(candidates)
+
+
+def _suppress_overlapping_template_offsets(
+    match_result: npt.NDArray[Any],
+    *,
+    offset: Point,
+    template_width: int,
+    template_height: int,
+) -> None:
+    result_height, result_width = match_result.shape[:2]
+    left = max(0, offset.x - template_width + 1)
+    top = max(0, offset.y - template_height + 1)
+    right = min(result_width, offset.x + template_width)
+    bottom = min(result_height, offset.y + template_height)
+    match_result[top:bottom, left:right] = np.inf
+
+
+def _select_non_overlapping_template_matches(
+    candidates: Iterable[_TemplateMatchCandidate],
+    *,
+    max_matches: int,
+) -> tuple[Match, ...]:
+    selected: list[_TemplateMatchCandidate] = []
+    for candidate in sorted(candidates, key=_template_candidate_sort_key):
+        if any(_rects_intersect(candidate.bounds, existing.bounds) for existing in selected):
+            continue
+        selected.append(candidate)
+        if len(selected) >= max_matches:
+            break
+    return tuple(
+        Match(
+            bounds=candidate.bounds,
+            confidence=candidate.confidence,
+            scale=candidate.scale,
+            rotation=candidate.rotation,
+        )
+        for candidate in selected
+    )
+
+
+def _template_candidate_sort_key(
+    candidate: _TemplateMatchCandidate,
+) -> tuple[float, int, int, int, float, float]:
+    return (
+        -candidate.confidence,
+        -(candidate.bounds.width * candidate.bounds.height),
+        candidate.bounds.top,
+        candidate.bounds.left,
+        candidate.scale,
+        candidate.rotation,
+    )
+
+
+def _rects_intersect(first: Rect, second: Rect) -> bool:
+    return (
+        first.left < second.right
+        and second.left < first.right
+        and first.top < second.bottom
+        and second.top < first.bottom
+    )
+
+
+__all__ = ["FeatureMatch", "find_feature_match", "find_template", "find_template_matches"]

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from android_game_automator.image import FrameImage
-from android_game_automator.types import Match, NormalizedPoint, ScreenRect
+from android_game_automator.types import Match, ScreenRect
 
 
 class TextReader(Protocol):
@@ -32,11 +32,25 @@ class TemplateMatcher(Protocol):
     ) -> Match | None: ...
 
 
+class TemplateMatchesFinder(Protocol):
+    """Callable shape used for conservative multi-template matching."""
+
+    def __call__(
+        self,
+        source: FrameImage,
+        template: str | PathLike[str],
+        *,
+        region: ScreenRect | None = None,
+        min_confidence: float = 0.9,
+        scales: Iterable[float] = (1.0,),
+        max_matches: int = 10,
+    ) -> tuple[Match, ...]: ...
+
+
 type BaseScreenDetection = tuple[BaseScreen, float, tuple[Evidence, ...]]
 type OverlayDetection = tuple[Overlay, float, tuple[Evidence, ...], RecommendedAction]
 type OverlayResult = tuple[Overlay, float, tuple[Evidence, ...], RecommendedAction | None]
 
-_BLOCKING_POPUP_BUTTON_TAP_TARGET = NormalizedPoint(x=0.50, y=0.88)
 _OCR_CONFIDENCE = 0.9
 
 
@@ -61,7 +75,6 @@ def blocking_overlay_result(
         kind=ActionKind.TAP,
         target=target,
         reason=overlay,
-        tap_target=_BLOCKING_POPUP_BUTTON_TAP_TARGET,
     )
     return overlay, _OCR_CONFIDENCE, (evidence,), action
 
@@ -157,6 +170,7 @@ __all__ = [
     "OverlayDetection",
     "OverlayResult",
     "TemplateMatcher",
+    "TemplateMatchesFinder",
     "TextReader",
     "blocking_overlay_result",
     "contains_phrase",

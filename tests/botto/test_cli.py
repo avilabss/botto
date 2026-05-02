@@ -12,6 +12,13 @@ from typing import Any
 
 import botto.cli as cli_module
 import pytest
+from botto.automation.config import (
+    AttackBattleConfig,
+    AttackConfig,
+    AttackResourcesConfig,
+    AttackSearchConfig,
+    BottoConfig,
+)
 from botto.cli import build_parser, run
 from botto.detection import BaseScreen, Overlay, ScreenAnalysis
 from botto.runtime import RuntimeAnalysisSnapshot, RuntimeLoopState
@@ -22,6 +29,8 @@ from tests.botto.fakes import (
     FakeFrameSource,
     FakeFrameSourceFactory,
     make_device_info,
+    write_default_botto_config,
+    write_default_strategy_file,
 )
 
 _CONSOLE_LOG_RE = re.compile(r"^\d{2}:\d{2}:\d{2} \| (?P<message>.*)$")
@@ -103,6 +112,8 @@ def test_run_headless_uses_runtime_and_logs_state_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    config_path = write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
     stdout = StringIO()
     stderr = StringIO()
     session = FakeAdbSession(device_id="emulator-5554")
@@ -144,6 +155,7 @@ def test_run_headless_uses_runtime_and_logs_state_changes(
     assert runtime_kwargs["source_factory"] is source_factory
     assert runtime_kwargs["screen_analyzer"] is analyzer
     expected_messages = [
+        _loaded_config_message(config_path),
         "Launched Clash of Clans",
         "Loading...",
         "On Home Screen",
@@ -164,6 +176,8 @@ def test_run_headless_serial_skip_launch_does_not_log_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    config_path = write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
     stdout = StringIO()
     stderr = StringIO()
     session = FakeAdbSession(device_id="emulator-5554")
@@ -183,7 +197,7 @@ def test_run_headless_serial_skip_launch_does_not_log_launch(
     )
 
     assert exit_code == 0
-    assert stderr.getvalue() == ""
+    assert _console_messages(stderr.getvalue()) == [_loaded_config_message(config_path)]
     assert runtime_kwargs["device_id"] == "emulator-5554"
     assert runtime_kwargs["launch"] is False
     assert stdout.getvalue() == ""
@@ -206,6 +220,8 @@ def test_run_verbose_enables_debug_lifecycle_logs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    config_path = write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
     stdout = StringIO()
     stderr = StringIO()
     session = FakeAdbSession(device_id="emulator-5554")
@@ -226,9 +242,118 @@ def test_run_verbose_enables_debug_lifecycle_logs(
     assert exit_code == 0
     assert stdout.getvalue() == ""
     records = _verbose_console_log_records(stderr.getvalue())
+    assert ("INFO", _loaded_config_message(config_path)) in records
     assert ("DEBUG", "Starting run command (debug=False, device=None, launch=True)") in records
     assert ("INFO", "Launched Clash of Clans") in records
     assert ("DEBUG", "Starting headless runtime") in records
+
+
+def test_run_missing_config_returns_clean_cli_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    def fail_backend_factory() -> FakeAdbBackend:
+        raise AssertionError("backend must not initialize when config is missing")
+
+    exit_code = run(
+        ["run"],
+        backend_factory=fail_backend_factory,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue().startswith("error: Botto config not found at ")
+
+
+def test_run_missing_selected_strategy_returns_clean_cli_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    write_default_botto_config(tmp_path)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    def fail_backend_factory() -> FakeAdbBackend:
+        raise AssertionError("backend must not initialize when strategy is missing")
+
+    exit_code = run(
+        ["run"],
+        backend_factory=fail_backend_factory,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue().startswith("error: Attack strategy 'mass-super-minion' not found at ")
+
+
+def test_run_wires_selected_strategy_into_headless_automation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
+    stdout = StringIO()
+    stderr = StringIO()
+    backend = FakeAdbBackend(session=FakeAdbSession(device_id="emulator-5554"))
+    headless_kwargs: dict[str, Any] = {}
+
+    async def fake_run_headless(**kwargs: Any) -> None:
+        headless_kwargs.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "_run_headless", fake_run_headless)
+
+    exit_code = run(
+        ["run"],
+        backend_factory=lambda: backend,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert stdout.getvalue() == ""
+    assert headless_kwargs["strategy"].name == "mass-super-minion"
+    assert len(headless_kwargs["strategy"].actions) == 4
+
+
+def test_run_debug_wires_selected_strategy_into_preview_automation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
+    monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
+    stdout = StringIO()
+    stderr = StringIO()
+    backend = FakeAdbBackend(session=FakeAdbSession(device_id="emulator-5554"))
+    preview_kwargs: dict[str, Any] = {}
+
+    async def fake_run_debug_preview(**kwargs: Any) -> None:
+        preview_kwargs.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "run_debug_preview", fake_run_debug_preview)
+
+    exit_code = run(
+        ["run", "--debug"],
+        backend_factory=lambda: backend,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert stdout.getvalue() == ""
+    assert preview_kwargs["runtime_state_hook"].strategy.name == "mass-super-minion"
+    assert len(preview_kwargs["runtime_state_hook"].strategy.actions) == 4
 
 
 def test_headless_sigint_request_exits_runtime_and_restores_handler(
@@ -273,6 +398,7 @@ def test_headless_sigint_request_exits_runtime_and_restores_handler(
                     overlay=Overlay.NONE,
                     confidence=0.0,
                 ),
+                config=_botto_config(),
             )
 
     asyncio.run(exercise_headless_shutdown())
@@ -322,6 +448,26 @@ def test_devices_json_output_includes_sdk_metadata() -> None:
     ]
 
 
+def test_devices_json_does_not_load_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_load_config() -> None:
+        raise AssertionError("devices must not load botto.toml")
+
+    monkeypatch.setattr(cli_module, "load_botto_config", fail_load_config)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = run(
+        ["devices", "--json"],
+        backend_factory=lambda: FakeAdbBackend(devices=()),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert json.loads(stdout.getvalue()) == []
+
+
 def test_devices_does_not_warm_up_ocr(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_warmup() -> None:
         raise AssertionError("devices must not initialize OCR")
@@ -355,6 +501,33 @@ def _verbose_console_log_records(log_text: str) -> list[tuple[str, str]]:
         assert match is not None
         records.append((match.group("level"), match.group("message")))
     return records
+
+
+def _loaded_config_message(config_path: Path) -> str:
+    return (
+        f"Loaded Botto config {config_path.resolve()}: "
+        "attack.strategy=mass-super-minion, "
+        "attack.resources.min_gold=500000, "
+        "attack.resources.min_elixir=500000, "
+        "attack.resources.min_dark_elixir=5000, "
+        "attack.search.max_searches=50, "
+        "attack.battle.resource_stall_seconds=20"
+    )
+
+
+def _botto_config() -> BottoConfig:
+    return BottoConfig(
+        attack=AttackConfig(
+            strategy="mass-super-minion",
+            resources=AttackResourcesConfig(
+                min_gold=500000,
+                min_elixir=500000,
+                min_dark_elixir=5000,
+            ),
+            search=AttackSearchConfig(max_searches=50),
+            battle=AttackBattleConfig(resource_stall_seconds=20),
+        )
+    )
 
 
 def _artifact_log_records(log_path: Path) -> list[tuple[str, str, str]]:

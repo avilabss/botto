@@ -6,6 +6,7 @@ import asyncio
 import threading
 
 from android_game_automator.image import FrameImage
+from android_game_automator.types import NormalizedPoint, Point, Size
 from botto.detection import BaseScreen, Overlay, ScreenAnalysis
 from botto.runtime import (
     DEFAULT_CLASH_PACKAGE,
@@ -146,6 +147,36 @@ def test_runtime_exit_callback_stops_source_closes_session_and_waits_for_analysi
     assert analyzer.finished.is_set()
 
 
+def test_runtime_exposes_action_executor_when_frame_source_supports_actions() -> None:
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
+    source = ActionFrameSource(frames=(make_frame("frame-1", width=200, height=100),))
+    source_factory = FakeFrameSourceFactory(source)
+
+    def sink(state: RuntimeLoopState) -> bool:
+        assert state.frame is not None
+        assert state.action_executor is not None
+        state.action_executor.tap(NormalizedPoint(x=0.5, y=0.5), label="test")
+        return False
+
+    asyncio.run(
+        run_read_only_runtime(
+            sink=sink,
+            device_id="emulator-5554",
+            launch=False,
+            backend=backend,
+            source_factory=source_factory,
+            screen_analyzer=lambda image: ScreenAnalysis(
+                base_screen=BaseScreen.UNKNOWN,
+                overlay=Overlay.NONE,
+                confidence=0.0,
+            ),
+        )
+    )
+
+    assert source.taps == [(Point(x=100, y=50), 0.05)]
+
+
 class BlockingAnalyzer:
     def __init__(self) -> None:
         self._analysis = ScreenAnalysis(
@@ -190,3 +221,26 @@ class IncrementingClock:
             value = self._value
             self._value += 1.0
         return value
+
+
+class ActionFrameSource(FakeFrameSource):
+    def __init__(self, *, frames: tuple[FrameImage, ...]) -> None:
+        super().__init__(frames=frames)
+        self.taps: list[tuple[Point, float]] = []
+
+    @property
+    def action_surface_size(self) -> Size:
+        return Size(width=200, height=100)
+
+    def tap_pixels(self, point: Point, *, hold_seconds: float = 0.05) -> None:
+        self.taps.append((point, hold_seconds))
+
+    def swipe_pixels(
+        self,
+        start: Point,
+        end: Point,
+        *,
+        duration_ms: int = 300,
+        steps: int = 12,
+    ) -> None:
+        _ = start, end, duration_ms, steps

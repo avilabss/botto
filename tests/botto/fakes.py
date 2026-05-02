@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 
 from android_game_automator.image import FrameImage
 from android_game_automator.types import (
@@ -13,6 +14,64 @@ from android_game_automator.types import (
     SessionInfo,
     Size,
 )
+
+DEFAULT_BOTTO_CONFIG_TEXT = """\
+[attack]
+strategy = "mass-super-minion"
+
+[attack.resources]
+min_gold = 500000
+min_elixir = 500000
+min_dark_elixir = 5000
+
+[attack.search]
+max_searches = 50
+
+[attack.battle]
+resource_stall_seconds = 20
+"""
+
+DEFAULT_STRATEGY_TEXT = """\
+[[actions]]
+type = "cast_spell_on_detected_targets"
+spell = "lightning"
+targets = ["air_defense"]
+casts_per_target = 3
+
+[[actions]]
+type = "deploy_unit_around_perimeter"
+unit = "super_minion"
+points_per_side = 4
+waves = 1
+
+[[actions]]
+type = "deploy_group_on_one_side"
+group = "cc_and_heroes"
+side = "auto"
+
+[[actions]]
+type = "activate_hero_abilities"
+heroes = [
+  "barbarian_king",
+  "archer_queen",
+  "grand_warden",
+  "royal_champion",
+]
+"""
+
+
+def write_default_botto_config(directory: Path) -> Path:
+    config_path = directory / "botto.toml"
+    config_path.write_text(DEFAULT_BOTTO_CONFIG_TEXT, encoding="utf-8")
+    return config_path
+
+
+def write_default_strategy_file(directory: Path, *, name: str = "mass-super-minion") -> Path:
+    strategy_dir = directory / "strategies"
+    strategy_dir.mkdir(exist_ok=True)
+    strategy_path = strategy_dir / f"{name}.toml"
+    strategy_path.write_text(DEFAULT_STRATEGY_TEXT, encoding="utf-8")
+    return strategy_path
 
 
 def make_frame(

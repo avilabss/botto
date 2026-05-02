@@ -8,13 +8,14 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from time import monotonic
-from typing import Protocol
+from typing import Protocol, TypeGuard
 
 from android_game_automator.image import FrameImage
 from android_game_automator.scrcpy import ScrcpyFrameSource
 from android_game_automator.types import SessionInfo
 
 from android_game_automator.adb import AdbDeviceBackend
+from botto.automation.actions import ActionBackend, ActionExecutor
 from botto.detection import ScreenAnalysis, analyze_screen
 
 from .config import (
@@ -137,6 +138,7 @@ async def run_read_only_runtime(
         source = resolved_source_factory(serial=serial, max_fps=max_fps)
         _LOGGER.debug("Starting frame source for device %s", serial)
         source.start()
+        action_executor = _action_executor_for_source(source)
 
         while True:
             complete_pending_analysis_if_ready()
@@ -165,6 +167,7 @@ async def run_read_only_runtime(
                 now=frame_time,
                 analysis_running=pending_analysis is not None,
                 session_info=session.info,
+                action_executor=action_executor,
                 _analysis_snapshot_refresher=complete_pending_analysis_if_ready,
             )
             if not sink(state):
@@ -232,6 +235,21 @@ def _default_runtime_frame_source_factory(
     max_fps: int,
 ) -> RuntimeFrameSource:
     return ScrcpyFrameSource(serial=serial, max_fps=max_fps)
+
+
+def _action_executor_for_source(source: RuntimeFrameSource) -> ActionExecutor | None:
+    if not _source_supports_action_backend(source):
+        _LOGGER.debug("Frame source does not expose action backend; automation input unavailable")
+        return None
+    return ActionExecutor(source)
+
+
+def _source_supports_action_backend(source: object) -> TypeGuard[ActionBackend]:
+    return (
+        "action_surface_size" in dir(source)
+        and callable(getattr(source, "tap_pixels", None))
+        and callable(getattr(source, "swipe_pixels", None))
+    )
 
 
 __all__ = [

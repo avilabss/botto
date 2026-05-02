@@ -8,7 +8,7 @@ from os import PathLike
 from pathlib import Path
 
 from android_game_automator.image import FrameImage
-from android_game_automator.types import Match, NormalizedPoint, Rect, ScreenRect
+from android_game_automator.types import Match, Rect, ScreenRect
 from botto.detection import (
     ActionKind,
     BaseScreen,
@@ -27,6 +27,29 @@ from tests.botto.fakes import make_frame
 _SUPERCELL_LOGO_TEMPLATE = "screens/supercell/logo.png"
 _ATTACK_BUTTON_TEMPLATE = "screens/home/attack_button.png"
 _SHOP_BUTTON_TEMPLATE = "screens/home/shop_button.png"
+_ATTACK_MENU_MULTIPLAYER_TITLE_TEMPLATE = "screens/attack_menu/multiplayer_title.png"
+_ATTACK_MENU_FIND_A_MATCH_BUTTON_TEMPLATE = "screens/attack_menu/find_a_match_button.png"
+_MY_ARMY_TITLE_TEMPLATE = "screens/my_army/title.png"
+_MY_ARMY_ATTACK_BUTTON_TEMPLATE = "screens/my_army/attack_button.png"
+_BATTLE_PREPARATION_BATTLE_STARTS_IN_TEMPLATE = "screens/battle/preparation/battle_starts_in.png"
+_BATTLE_PREPARATION_NEXT_BUTTON_TEMPLATE = "screens/battle/preparation/next_button.png"
+_BATTLE_ACTIVE_END_BATTLE_BUTTON_TEMPLATE = "screens/battle/active/end_battle_button.png"
+_BATTLE_ACTIVE_SURRENDER_BUTTON_TEMPLATE = "screens/battle/active/surrender_button.png"
+_BATTLE_ACTIVE_OVERALL_DAMAGE_TEMPLATE = "screens/battle/active/overall_damage.png"
+_BATTLE_END_RETURN_HOME_BUTTON_TEMPLATE = "screens/battle/end/return_home_button.png"
+_BATTLE_END_CLAIM_REWARD_BUTTON_TEMPLATE = "screens/battle/end/claim_reward_button.png"
+_BATTLE_SURRENDER_OKAY_BUTTON_TEMPLATE = "screens/battle/surrender/okay_button.png"
+_REWARD_CHEST_CLOSED_CHEST_TEMPLATE = "screens/rewards/chest/closed_chest.png"
+_REWARD_CHEST_CONTINUE_BUTTON_TEMPLATE = "screens/rewards/chest/continue_button.png"
+_STAR_BONUS_OKAY_BUTTON_TEMPLATE = "screens/rewards/star_bonus/okay_button.png"
+_PRE_HOME_TEMPLATE_PROBES = [
+    _SUPERCELL_LOGO_TEMPLATE,
+    _STAR_BONUS_OKAY_BUTTON_TEMPLATE,
+    _MY_ARMY_TITLE_TEMPLATE,
+    _MY_ARMY_ATTACK_BUTTON_TEMPLATE,
+    _ATTACK_MENU_MULTIPLAYER_TITLE_TEMPLATE,
+    _ATTACK_MENU_FIND_A_MATCH_BUTTON_TEMPLATE,
+]
 
 
 def test_analyze_screen_detects_loading_from_ocr() -> None:
@@ -46,11 +69,7 @@ def test_analyze_screen_detects_loading_from_ocr() -> None:
     assert analysis.evidence[0].kind is EvidenceKind.OCR
     assert analysis.evidence[0].subject is BaseScreen.LOADING
     assert analysis.evidence[0].anchor is ScreenElement.LOADING_TEXT
-    assert [call[0] for call in matcher.calls] == [
-        _SUPERCELL_LOGO_TEMPLATE,
-        _ATTACK_BUTTON_TEMPLATE,
-        _SHOP_BUTTON_TEMPLATE,
-    ]
+    assert [call[0] for call in matcher.calls] == [*_PRE_HOME_TEMPLATE_PROBES, *_home_templates()]
     assert len(reader.calls) == 2
 
 
@@ -101,12 +120,234 @@ def test_analyze_screen_detects_home_village_from_anchor_templates() -> None:
         HomeElement.ATTACK_BUTTON,
         HomeElement.SHOP_BUTTON,
     }
-    assert [call[0] for call in matcher.calls] == [
-        _SUPERCELL_LOGO_TEMPLATE,
-        _ATTACK_BUTTON_TEMPLATE,
-        _SHOP_BUTTON_TEMPLATE,
-    ]
+    assert [call[0] for call in matcher.calls] == [*_PRE_HOME_TEMPLATE_PROBES, *_home_templates()]
     assert len(reader.calls) == 1
+
+
+def test_analyze_screen_detects_attack_menu_from_anchor_templates() -> None:
+    matcher = FakeTemplateMatcher(
+        {
+            _ATTACK_MENU_MULTIPLAYER_TITLE_TEMPLATE: 0.93,
+            _ATTACK_MENU_FIND_A_MATCH_BUTTON_TEMPLATE: 0.91,
+        }
+    )
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader(""),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.ATTACK_MENU
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.92
+    assert _evidence_labels(analysis) == {
+        "attack_menu_multiplayer_title",
+        "attack_menu_find_a_match_button",
+    }
+    assert {evidence.subject for evidence in analysis.evidence} == {BaseScreen.ATTACK_MENU}
+    assert {evidence.anchor for evidence in analysis.evidence} == {
+        ScreenElement.ATTACK_MENU_MULTIPLAYER_TITLE,
+        ScreenElement.ATTACK_MENU_FIND_A_MATCH_BUTTON,
+    }
+
+
+def test_analyze_screen_detects_my_army_from_anchor_templates() -> None:
+    matcher = FakeTemplateMatcher(
+        {
+            _MY_ARMY_TITLE_TEMPLATE: 0.91,
+            _MY_ARMY_ATTACK_BUTTON_TEMPLATE: 0.89,
+        }
+    )
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader(""),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.MY_ARMY
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.90
+    assert _evidence_labels(analysis) == {"my_army_title", "my_army_attack_button"}
+    assert {evidence.subject for evidence in analysis.evidence} == {BaseScreen.MY_ARMY}
+    assert {evidence.anchor for evidence in analysis.evidence} == {
+        ScreenElement.MY_ARMY_TITLE,
+        ScreenElement.MY_ARMY_ATTACK_BUTTON,
+    }
+
+
+def test_analyze_screen_detects_battle_preparation_before_active_battle() -> None:
+    matcher = FakeTemplateMatcher(
+        {
+            _BATTLE_PREPARATION_BATTLE_STARTS_IN_TEMPLATE: 0.91,
+            _BATTLE_PREPARATION_NEXT_BUTTON_TEMPLATE: 0.89,
+            _BATTLE_ACTIVE_OVERALL_DAMAGE_TEMPLATE: 0.93,
+        }
+    )
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader("", ""),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.BATTLE_PREPARATION
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.90
+    assert _evidence_labels(analysis) == {"battle_starts_in_text", "battle_next_button"}
+    assert {evidence.subject for evidence in analysis.evidence} == {BaseScreen.BATTLE_PREPARATION}
+    assert {evidence.anchor for evidence in analysis.evidence} == {
+        ScreenElement.BATTLE_STARTS_IN_TEXT,
+        ScreenElement.BATTLE_NEXT_BUTTON,
+    }
+    assert _BATTLE_ACTIVE_OVERALL_DAMAGE_TEMPLATE not in [call[0] for call in matcher.calls]
+
+
+def test_analyze_screen_detects_active_battle_from_damage_and_button_templates() -> None:
+    matcher = FakeTemplateMatcher(
+        {
+            _BATTLE_ACTIVE_END_BATTLE_BUTTON_TEMPLATE: 0.91,
+            _BATTLE_ACTIVE_SURRENDER_BUTTON_TEMPLATE: 0.90,
+            _BATTLE_ACTIVE_OVERALL_DAMAGE_TEMPLATE: 0.89,
+        }
+    )
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader("", ""),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.BATTLE_IN_PROGRESS
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.90
+    assert _evidence_labels(analysis) == {
+        "battle_end_battle_button",
+        "battle_surrender_button",
+        "battle_overall_damage",
+    }
+    assert {evidence.subject for evidence in analysis.evidence} == {BaseScreen.BATTLE_IN_PROGRESS}
+    assert {evidence.anchor for evidence in analysis.evidence} == {
+        ScreenElement.BATTLE_END_BATTLE_BUTTON,
+        ScreenElement.BATTLE_SURRENDER_BUTTON,
+        ScreenElement.BATTLE_OVERALL_DAMAGE,
+    }
+
+
+def test_analyze_screen_detects_active_battle_from_battle_ends_ocr() -> None:
+    matcher = FakeTemplateMatcher({_BATTLE_ACTIVE_END_BATTLE_BUTTON_TEMPLATE: 0.91})
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader("", "", "Battle ends in: 2M 57S"),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.BATTLE_IN_PROGRESS
+    assert analysis.overlay == Overlay.NONE
+    assert _evidence_labels(analysis) == {
+        "battle_end_battle_button",
+        "battle_ends_in_text",
+    }
+    assert analysis.evidence[-1].kind is EvidenceKind.OCR
+    assert analysis.evidence[-1].anchor is ScreenElement.BATTLE_ENDS_IN_TEXT
+
+
+def test_analyze_screen_detects_battle_surrender_confirmation_from_okay_template() -> None:
+    matcher = FakeTemplateMatcher({_BATTLE_SURRENDER_OKAY_BUTTON_TEMPLATE: 0.91})
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader("", ""),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.BATTLE_SURRENDER_CONFIRMATION
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.91
+    assert _evidence_labels(analysis) == {"battle_surrender_okay_button"}
+    assert analysis.evidence[0].kind is EvidenceKind.TEMPLATE
+    assert analysis.evidence[0].subject is BaseScreen.BATTLE_SURRENDER_CONFIRMATION
+    assert analysis.evidence[0].anchor is ScreenElement.BATTLE_SURRENDER_OKAY_BUTTON
+
+
+def test_analyze_screen_detects_battle_result_from_claim_reward_template() -> None:
+    matcher = FakeTemplateMatcher({_BATTLE_END_CLAIM_REWARD_BUTTON_TEMPLATE: 0.93})
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader("", ""),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.BATTLE_RESULT
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.93
+    assert _evidence_labels(analysis) == {"battle_claim_reward_button"}
+    assert analysis.evidence[0].kind is EvidenceKind.TEMPLATE
+    assert analysis.evidence[0].subject is BaseScreen.BATTLE_RESULT
+    assert analysis.evidence[0].anchor is ScreenElement.BATTLE_CLAIM_REWARD_BUTTON
+
+
+def test_analyze_screen_detects_reward_chest_from_continue_template() -> None:
+    matcher = FakeTemplateMatcher({_REWARD_CHEST_CONTINUE_BUTTON_TEMPLATE: 0.91})
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader("", ""),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.REWARD_CHEST
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.91
+    assert _evidence_labels(analysis) == {"reward_chest_continue_button"}
+    assert analysis.evidence[0].kind is EvidenceKind.TEMPLATE
+    assert analysis.evidence[0].subject is BaseScreen.REWARD_CHEST
+    assert analysis.evidence[0].anchor is ScreenElement.REWARD_CHEST_CONTINUE_BUTTON
+
+
+def test_analyze_screen_detects_reward_chest_from_closed_chest_template() -> None:
+    matcher = FakeTemplateMatcher({_REWARD_CHEST_CLOSED_CHEST_TEMPLATE: 0.91})
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader("", ""),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.REWARD_CHEST
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.91
+    assert _evidence_labels(analysis) == {"reward_chest_open_chest"}
+    assert analysis.evidence[0].kind is EvidenceKind.TEMPLATE
+    assert analysis.evidence[0].subject is BaseScreen.REWARD_CHEST
+    assert analysis.evidence[0].anchor is ScreenElement.REWARD_CHEST_OPEN_CHEST
+
+
+def test_analyze_screen_detects_star_bonus_from_title_ocr_and_okay_template() -> None:
+    matcher = FakeTemplateMatcher({_STAR_BONUS_OKAY_BUTTON_TEMPLATE: 0.92})
+
+    analysis = analyze_screen(
+        _frame(),
+        read_text_fn=FakeTextReader("", "Star Bonus Received!"),
+        find_template_fn=matcher,
+    )
+
+    assert analysis.base_screen == BaseScreen.STAR_BONUS
+    assert analysis.overlay == Overlay.NONE
+    assert analysis.confidence == 0.90
+    assert _evidence_labels(analysis) == {"star_bonus_title", "star_bonus_okay_button"}
+    assert [evidence.kind for evidence in analysis.evidence] == [
+        EvidenceKind.OCR,
+        EvidenceKind.TEMPLATE,
+    ]
+    assert {evidence.subject for evidence in analysis.evidence} == {BaseScreen.STAR_BONUS}
+    assert {evidence.anchor for evidence in analysis.evidence} == {
+        ScreenElement.STAR_BONUS_TITLE,
+        ScreenElement.STAR_BONUS_OKAY_BUTTON,
+    }
 
 
 def test_analyze_screen_passes_reference_scales_to_home_templates() -> None:
@@ -172,7 +413,7 @@ def test_analyze_screen_detects_connection_lost_without_try_again_and_short_circ
     assert analysis.recommended_action.target is PopupButton.TRY_AGAIN
     assert analysis.recommended_action.reason is Overlay.CONNECTION_LOST
     assert analysis.recommended_action.display_label == "tap_try_again"
-    assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
+    assert analysis.recommended_action.tap_target is None
     assert _evidence_labels(analysis) == {"modal.connection_lost"}
     assert analysis.evidence[0].kind is EvidenceKind.OCR
     assert analysis.evidence[0].subject is Overlay.CONNECTION_LOST
@@ -197,7 +438,7 @@ def test_analyze_screen_detects_another_device_before_generic_connection_lost() 
     assert analysis.recommended_action.target is PopupButton.RELOAD
     assert analysis.recommended_action.reason is Overlay.ANOTHER_DEVICE_CONNECTED
     assert analysis.recommended_action.display_label == "tap_reload"
-    assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
+    assert analysis.recommended_action.tap_target is None
     assert _evidence_labels(analysis) == {"modal.another_device_connected"}
     assert analysis.evidence[0].kind is EvidenceKind.OCR
     assert analysis.evidence[0].subject is Overlay.ANOTHER_DEVICE_CONNECTED
@@ -220,8 +461,7 @@ def test_analyze_screen_detects_anyone_there_overlay() -> None:
     assert analysis.recommended_action.target is PopupButton.RELOAD_GAME
     assert analysis.recommended_action.reason is Overlay.ANYONE_THERE
     assert analysis.recommended_action.display_label == "tap_reload_game"
-    assert analysis.recommended_action.tap_target == NormalizedPoint(x=0.50, y=0.88)
-    assert analysis.recommended_action.tap_target.y != 0.78
+    assert analysis.recommended_action.tap_target is None
     assert _evidence_labels(analysis) == {"modal.anyone_there"}
     assert analysis.evidence[0].kind is EvidenceKind.OCR
     assert analysis.evidence[0].subject is Overlay.ANYONE_THERE
@@ -248,6 +488,10 @@ def _frame(*, width: int = 16, height: int = 16) -> FrameImage:
 
 def _evidence_labels(analysis: ScreenAnalysis) -> set[str]:
     return {evidence.display_label for evidence in analysis.evidence}
+
+
+def _home_templates() -> list[str]:
+    return [_ATTACK_BUTTON_TEMPLATE, _SHOP_BUTTON_TEMPLATE]
 
 
 def _home_scale_calls(matcher: FakeTemplateMatcher) -> dict[str, tuple[float, ...]]:

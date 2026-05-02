@@ -41,6 +41,7 @@ from botto.live import (
     render_debug_overlay,
     run_debug_preview,
 )
+from botto.runtime import RuntimeLoopState
 from PIL import Image
 
 from tests.botto.fakes import (
@@ -50,6 +51,8 @@ from tests.botto.fakes import (
     FakeFrameSourceFactory,
     FakePreviewWindow,
     make_frame,
+    write_default_botto_config,
+    write_default_strategy_file,
 )
 
 _CONSOLE_LOG_RE = re.compile(r"^\d{2}:\d{2}:\d{2} \| (?P<message>.*)$")
@@ -82,6 +85,8 @@ def test_run_debug_preview_launches_default_package_and_starts_scrcpy_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    config_path = write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
     monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     stdout = StringIO()
     stderr = StringIO()
@@ -110,6 +115,7 @@ def test_run_debug_preview_launches_default_package_and_starts_scrcpy_source(
     assert exit_code == 0
     assert stdout.getvalue() == ""
     assert _console_messages(stderr.getvalue()) == [
+        _loaded_config_message(config_path),
         "Starting debug preview",
         "Debug preview exit requested",
     ]
@@ -130,6 +136,8 @@ def test_run_debug_preview_skip_launch_keeps_current_screen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    config_path = write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
     monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     stdout = StringIO()
     stderr = StringIO()
@@ -157,6 +165,7 @@ def test_run_debug_preview_skip_launch_keeps_current_screen(
 
     assert exit_code == 0
     assert _console_messages(stderr.getvalue()) == [
+        _loaded_config_message(config_path),
         "Starting debug preview",
         "Debug preview exit requested",
     ]
@@ -173,6 +182,8 @@ def test_run_debug_preview_log_and_hotkey_artifacts_share_run_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    config_path = write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
     monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     stdout = StringIO()
     stderr = StringIO()
@@ -207,13 +218,15 @@ def test_run_debug_preview_log_and_hotkey_artifacts_share_run_directory(
         f"saved debug-preview raw artifact debug-preview-raw-000001: image={logged_image_path}"
     )
     expected_messages = [
+        _loaded_config_message(config_path),
         "Starting debug preview",
         saved_message,
         "Debug preview exit requested",
     ]
     assert _console_messages(stderr.getvalue()) == expected_messages
     assert _artifact_log_records(log_path) == [
-        ("INFO", "botto.live.debug_preview", message) for message in expected_messages
+        ("INFO", "botto.cli", expected_messages[0]),
+        *(("INFO", "botto.live.debug_preview", message) for message in expected_messages[1:]),
     ]
 
 
@@ -222,6 +235,8 @@ def test_run_debug_preview_warms_up_ocr_before_first_analysis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
     events: list[str] = []
 
     def fake_warmup() -> None:
@@ -362,6 +377,36 @@ def test_debug_preview_uses_latest_frame_without_consuming_stale_frame_queue() -
     assert [frame.frame_id for frame in preview.shown_frames] == ["latest-frame"]
     assert source.latest_frame_calls == 1
     assert source.frames_calls == 0
+
+
+def test_debug_preview_runtime_hook_preserves_rendering_and_q_exit() -> None:
+    session = FakeAdbSession(device_id="emulator-5554")
+    backend = FakeAdbBackend(session=session)
+    source = FakeFrameSource(frames=(make_frame("frame-1"), make_frame("frame-2")))
+    source_factory = FakeFrameSourceFactory(source)
+    preview = FakePreviewWindow(keys=(-1, ord("q")))
+    hook_frame_ids: list[str | None] = []
+
+    def runtime_hook(state: RuntimeLoopState) -> bool:
+        hook_frame_ids.append(state.frame.frame_id if state.frame is not None else None)
+        return True
+
+    asyncio.run(
+        run_debug_preview(
+            device_id="emulator-5554",
+            launch=False,
+            backend=backend,
+            source_factory=source_factory,
+            preview_window=preview,
+            screen_analyzer=FakeAnalyzer(),
+            overlay_renderer=passthrough_renderer,
+            runtime_state_hook=runtime_hook,
+        )
+    )
+
+    assert [frame.frame_id for frame in preview.shown_frames] == ["frame-1", "frame-2"]
+    assert hook_frame_ids == ["frame-1"]
+    assert preview.closed == [DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE]
 
 
 def test_debug_preview_s_hotkey_saves_raw_frame_and_latest_analysis(
@@ -702,6 +747,8 @@ def test_debug_preview_exits_on_q_or_escape_cleans_up_background_work_and_remain
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    write_default_botto_config(tmp_path)
+    write_default_strategy_file(tmp_path)
     monkeypatch.setattr(cli_module, "warm_up_ocr", lambda: None)
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
@@ -750,6 +797,18 @@ def _console_messages(log_text: str) -> list[str]:
         assert match is not None
         messages.append(match.group("message"))
     return messages
+
+
+def _loaded_config_message(config_path: Path) -> str:
+    return (
+        f"Loaded Botto config {config_path.resolve()}: "
+        "attack.strategy=mass-super-minion, "
+        "attack.resources.min_gold=500000, "
+        "attack.resources.min_elixir=500000, "
+        "attack.resources.min_dark_elixir=5000, "
+        "attack.search.max_searches=50, "
+        "attack.battle.resource_stall_seconds=20"
+    )
 
 
 def _artifact_log_records(log_path: Path) -> list[tuple[str, str, str]]:

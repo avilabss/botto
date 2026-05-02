@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from android_game_automator.image import FrameImage
 from android_game_automator.types import SessionInfo
 
 from botto.detection import ScreenAnalysis
+
+if TYPE_CHECKING:
+    from botto.automation.actions import ActionExecutor
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +34,7 @@ class RuntimeLoopState:
     now: float
     analysis_running: bool
     session_info: SessionInfo
+    action_executor: ActionExecutor | None = None
     _analysis_snapshot_refresher: Callable[[], RuntimeAnalysisSnapshot | None] | None = field(
         default=None,
         repr=False,
