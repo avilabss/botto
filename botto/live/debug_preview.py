@@ -202,14 +202,11 @@ async def run_debug_preview(
             _LOGGER.info("Debug preview exit requested")
             close_window_if_open()
             return False
-        snapshot_for_save = snapshot
-        if _debug_preview_artifact_selection(key_code) is not None:
-            snapshot_for_save = state.refresh_analysis_snapshot()
         save_artifacts_for_hotkey(
             key_code=key_code,
             raw_frame=frame,
             annotated_frame=annotated_frame,
-            snapshot=snapshot_for_save,
+            snapshot=snapshot,
             session_info=state.session_info,
             now=frame_time,
         )

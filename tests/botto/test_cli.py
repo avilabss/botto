@@ -12,6 +12,7 @@ from typing import Any
 
 import botto.cli as cli_module
 import pytest
+from android_game_automator.image import FrameImage
 from botto.automation.config import (
     AttackBattleConfig,
     AttackConfig,
@@ -29,6 +30,7 @@ from tests.botto.fakes import (
     FakeFrameSource,
     FakeFrameSourceFactory,
     make_device_info,
+    make_frame,
     write_default_botto_config,
     write_default_strategy_file,
 )
@@ -375,12 +377,13 @@ def test_headless_sigint_request_exits_runtime_and_restores_handler(
         return signal.SIG_DFL
 
     class ShutdownFrameSource(FakeFrameSource):
-        def latest_frame(self) -> None:
-            self.latest_frame_calls += 1
+        def wait_for_frame(self, *, timeout: float | None = None) -> FrameImage:
+            _ = timeout
+            self.wait_for_frame_calls += 1
             handler = installed_handlers[0]
             assert callable(handler)
             handler(signal.SIGINT, None)
-            return None
+            return make_frame("shutdown-frame")
 
     source = ShutdownFrameSource(frames=())
 
@@ -406,7 +409,8 @@ def test_headless_sigint_request_exits_runtime_and_restores_handler(
     assert _console_messages(stderr.getvalue()) == ["Shutdown requested; stopping runtime"]
     assert source.start_calls == 1
     assert source.stop_calls == 1
-    assert source.latest_frame_calls == 1
+    assert source.wait_for_frame_calls == 1
+    assert source.latest_frame_calls == 0
     assert session.closed is True
     assert installed_handlers[-1] == signal.SIG_DFL
 

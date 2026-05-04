@@ -33,6 +33,7 @@ from botto.detection import (
     Evidence,
     HomeElement,
     Overlay,
+    PopupButton,
     ScreenAnalysis,
     ScreenElement,
     detect_air_defense_targets,
@@ -107,7 +108,7 @@ class AutomationController:
     def __call__(self, state: RuntimeLoopState) -> bool:
         """Handle one runtime loop state and return whether runtime should continue."""
 
-        snapshot = state.refresh_analysis_snapshot()
+        snapshot = state.analysis_snapshot
         if snapshot is None:
             self._log_decision_once(("idle", "no_analysis"), "Automation idle: no analysis yet")
             return True
@@ -180,10 +181,10 @@ class AutomationController:
             return False
 
         action = analysis.recommended_action
-        if action is None or action.tap_target is None:
+        if action is None:
             self._log_decision_once(
-                ("overlay", analysis.overlay.value, "no_tap_target"),
-                "Automation idle: overlay=%s has no tap target",
+                ("overlay", analysis.overlay.value, "no_recommended_action"),
+                "Automation idle: overlay=%s has no recommended action",
                 analysis.overlay.value,
             )
             return True
@@ -196,9 +197,24 @@ class AutomationController:
             )
             return True
 
+        point = _tap_point_from_matching_evidence(
+            analysis,
+            subject=analysis.overlay,
+            anchor=action.target,
+            frame=state.frame,
+        )
+        if point is None:
+            self._log_decision_once(
+                ("overlay", analysis.overlay.value, action.target.value, "no_bounds"),
+                "Automation idle: overlay=%s button=%s has no evidence bounds",
+                analysis.overlay.value,
+                action.target.value,
+            )
+            return True
+
         self._tap(
             state,
-            action.tap_target,
+            point,
             snapshot_signature,
             signature=("overlay", analysis.overlay.value, action.target.value),
             label=f"overlay.{analysis.overlay.value}.{action.target.value}",
@@ -800,12 +816,27 @@ class AutomationController:
 def _find_evidence(
     analysis: ScreenAnalysis,
     *,
-    subject: BaseScreen,
-    anchor: HomeElement | ScreenElement,
+    subject: BaseScreen | Overlay,
+    anchor: HomeElement | PopupButton | ScreenElement,
 ) -> Evidence | None:
     for evidence in analysis.evidence:
         if evidence.subject == subject and evidence.anchor == anchor:
             return evidence
+    return None
+
+
+def _tap_point_from_matching_evidence(
+    analysis: ScreenAnalysis,
+    *,
+    subject: BaseScreen | Overlay,
+    anchor: HomeElement | PopupButton | ScreenElement,
+    frame: FrameImage | None,
+) -> NormalizedPoint | None:
+    for evidence in analysis.evidence:
+        if evidence.subject == subject and evidence.anchor == anchor:
+            point = _tap_point_from_evidence(evidence, frame)
+            if point is not None:
+                return point
     return None
 
 

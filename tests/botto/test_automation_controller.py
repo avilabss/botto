@@ -35,7 +35,7 @@ from botto.runtime import RuntimeAnalysisSnapshot, RuntimeLoopState
 from tests.botto.fakes import make_device_info, make_frame
 
 
-def test_controller_taps_explicit_overlay_recommended_action_target() -> None:
+def test_controller_does_not_tap_overlay_target_without_button_evidence() -> None:
     backend = FakeActionBackend(Size(width=200, height=100))
     controller = AutomationController()
     analysis = ScreenAnalysis(
@@ -52,7 +52,68 @@ def test_controller_taps_explicit_overlay_recommended_action_target() -> None:
 
     assert controller(_state(analysis, backend=backend)) is True
 
-    assert backend.taps == [(Point(x=50, y=30), 0.05)]
+    assert backend.taps == []
+
+
+def test_controller_taps_overlay_recommended_action_from_button_evidence_bounds() -> None:
+    backend = FakeActionBackend(Size(width=200, height=100))
+    controller = AutomationController()
+    analysis = ScreenAnalysis(
+        base_screen=BaseScreen.UNKNOWN,
+        overlay=Overlay.CONNECTION_LOST,
+        confidence=0.9,
+        evidence=(
+            _template_evidence(
+                subject=Overlay.CONNECTION_LOST,
+                anchor=PopupButton.TRY_AGAIN,
+                bounds=Rect(left=80, top=50, width=40, height=20),
+            ),
+        ),
+        recommended_action=RecommendedAction(
+            kind=ActionKind.TAP,
+            target=PopupButton.TRY_AGAIN,
+            reason=Overlay.CONNECTION_LOST,
+            tap_target=NormalizedPoint(x=0.25, y=0.30),
+        ),
+    )
+
+    assert controller(_state(analysis, backend=backend)) is True
+
+    assert backend.taps == [(Point(x=100, y=60), 0.05)]
+
+
+def test_controller_uses_later_overlay_button_evidence_when_first_lacks_bounds() -> None:
+    backend = FakeActionBackend(Size(width=200, height=100))
+    controller = AutomationController()
+    analysis = ScreenAnalysis(
+        base_screen=BaseScreen.UNKNOWN,
+        overlay=Overlay.CONNECTION_LOST,
+        confidence=0.9,
+        evidence=(
+            Evidence(
+                kind=EvidenceKind.OCR,
+                subject=Overlay.CONNECTION_LOST,
+                anchor=PopupButton.TRY_AGAIN,
+                confidence=0.9,
+                text="Try Again",
+            ),
+            _template_evidence(
+                subject=Overlay.CONNECTION_LOST,
+                anchor=PopupButton.TRY_AGAIN,
+                bounds=Rect(left=120, top=40, width=20, height=20),
+            ),
+        ),
+        recommended_action=RecommendedAction(
+            kind=ActionKind.TAP,
+            target=PopupButton.TRY_AGAIN,
+            reason=Overlay.CONNECTION_LOST,
+            tap_target=NormalizedPoint(x=0.25, y=0.30),
+        ),
+    )
+
+    assert controller(_state(analysis, backend=backend)) is True
+
+    assert backend.taps == [(Point(x=130, y=50), 0.05)]
 
 
 def test_controller_does_not_tap_ocr_only_overlay_without_target() -> None:
@@ -71,6 +132,45 @@ def test_controller_does_not_tap_ocr_only_overlay_without_target() -> None:
 
     assert controller(_state(analysis, backend=backend)) is True
 
+    assert backend.taps == []
+
+
+def test_controller_uses_attached_snapshot_when_legacy_refresh_would_mismatch() -> None:
+    backend = FakeActionBackend(Size(width=200, height=100))
+    controller = AutomationController()
+    attached_snapshot = RuntimeAnalysisSnapshot(
+        analysis=ScreenAnalysis(
+            base_screen=BaseScreen.UNKNOWN,
+            overlay=Overlay.NONE,
+            confidence=0.9,
+        ),
+        analyzed_at=0.0,
+        frame_id="attached-frame",
+    )
+    refreshed_snapshot = RuntimeAnalysisSnapshot(
+        analysis=ScreenAnalysis(
+            base_screen=BaseScreen.HOME_VILLAGE,
+            overlay=Overlay.NONE,
+            confidence=0.9,
+            evidence=(
+                _template_evidence(
+                    subject=BaseScreen.HOME_VILLAGE,
+                    anchor=HomeElement.ATTACK_BUTTON,
+                    bounds=Rect(left=20, top=70, width=40, height=20),
+                ),
+            ),
+        ),
+        analyzed_at=0.1,
+        frame_id="refreshed-frame",
+    )
+    state = LegacyRefreshState(
+        _state_from_snapshot(attached_snapshot, backend=backend, now=0.0),
+        refreshed_snapshot,
+    )
+
+    assert controller(state) is True
+
+    assert state.refresh_calls == 0
     assert backend.taps == []
 
 
@@ -998,8 +1098,8 @@ def test_controller_exposes_loaded_strategy_for_future_automation_steps() -> Non
 
 def _template_evidence(
     *,
-    subject: BaseScreen,
-    anchor: HomeElement | ScreenElement,
+    subject: BaseScreen | Overlay,
+    anchor: HomeElement | PopupButton | ScreenElement,
     bounds: Rect,
 ) -> Evidence:
     return Evidence(
@@ -1274,6 +1374,26 @@ def make_session_info() -> SessionInfo:
 
 def _strategy_plan(*steps: PlannedTapStep) -> StrategyExecutionPlan:
     return StrategyExecutionPlan(strategy_name="mass-super-minion", steps=steps, skips=())
+
+
+class LegacyRefreshState:
+    def __init__(
+        self,
+        state: RuntimeLoopState,
+        refreshed_snapshot: RuntimeAnalysisSnapshot,
+    ) -> None:
+        self.frame = state.frame
+        self.analysis_snapshot = state.analysis_snapshot
+        self.now = state.now
+        self.analysis_running = state.analysis_running
+        self.session_info = state.session_info
+        self.action_executor = state.action_executor
+        self._refreshed_snapshot = refreshed_snapshot
+        self.refresh_calls = 0
+
+    def refresh_analysis_snapshot(self) -> RuntimeAnalysisSnapshot:
+        self.refresh_calls += 1
+        return self._refreshed_snapshot
 
 
 class FakeDetector:

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from android_game_automator.image import FrameImage
@@ -35,18 +34,11 @@ class RuntimeLoopState:
     analysis_running: bool
     session_info: SessionInfo
     action_executor: ActionExecutor | None = None
-    _analysis_snapshot_refresher: Callable[[], RuntimeAnalysisSnapshot | None] | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
 
     def refresh_analysis_snapshot(self) -> RuntimeAnalysisSnapshot | None:
-        """Harvest completed analysis, if available, and return the latest snapshot."""
+        """Return the analysis snapshot attached to this emitted state."""
 
-        if self._analysis_snapshot_refresher is None:
-            return self.analysis_snapshot
-        return self._analysis_snapshot_refresher()
+        return self.analysis_snapshot
 
 
 __all__ = ["RuntimeAnalysisSnapshot", "RuntimeLoopState"]

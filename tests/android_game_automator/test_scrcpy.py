@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 
+import android_game_automator.scrcpy as scrcpy_module
 import numpy as np
 import pytest
 from android_game_automator.scrcpy import (
@@ -57,6 +59,79 @@ def test_scrcpy_frame_source_start_stop_are_idempotent() -> None:
     assert source.started is False
 
 
+def test_scrcpy_wait_for_frame_requires_started_source_without_creating_client() -> None:
+    created_configs = []
+    source = ScrcpyFrameSource(
+        client_factory=lambda config: created_configs.append(config) or FakeScrcpyClient(),
+    )
+
+    with pytest.raises(RuntimeError, match="scrcpy frame source is not started"):
+        source.wait_for_frame(timeout=0.1)
+
+    assert created_configs == []
+
+
+def test_scrcpy_latest_frame_is_non_blocking_latest_frame_helper() -> None:
+    client = FakeScrcpyClient(latest_frame=_bgr_frame(blue=10, green=20, red=30))
+    created_configs = []
+    source = ScrcpyFrameSource(
+        client_factory=lambda config: created_configs.append(config) or client,
+    )
+
+    assert source.latest_frame() is None
+    assert created_configs == []
+
+    source.start()
+    client.frame_counter = 7
+    image = source.latest_frame()
+
+    assert image is not None
+    assert image.frame_id == "scrcpy:7"
+    assert image.to_array() == (((30, 20, 10, 255),),)
+    assert client.get_frame_calls == []
+
+
+def test_scrcpy_frame_ids_and_captured_timestamps_track_latest_and_snapshot_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_time = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    _patch_scrcpy_datetime(
+        monkeypatch,
+        base_time,
+        base_time + timedelta(seconds=1),
+        base_time + timedelta(seconds=2),
+        base_time + timedelta(seconds=3),
+    )
+    client = FakeScrcpyClient(
+        latest_frame=_bgr_frame(blue=1, green=2, red=3),
+        frames=(_bgr_frame(blue=4, green=5, red=6),),
+    )
+    source = ScrcpyFrameSource(client_factory=lambda config: client)
+    source.start()
+
+    client.frame_counter = 3
+    first_latest = source.latest_frame()
+    repeated_latest = source.latest_frame()
+    client.frame_counter = 4
+    client.latest_frame = _bgr_frame(blue=7, green=8, red=9)
+    new_latest = source.latest_frame()
+    snapshot = source.wait_for_frame(timeout=0.25)
+
+    assert first_latest is not None
+    assert repeated_latest is not None
+    assert new_latest is not None
+    assert first_latest.frame_id == "scrcpy:3"
+    assert repeated_latest.frame_id == "scrcpy:3"
+    assert new_latest.frame_id == "scrcpy:4"
+    assert snapshot.frame_id == "scrcpy:5"
+    assert first_latest.captured_at == base_time
+    assert repeated_latest.captured_at == base_time + timedelta(seconds=1)
+    assert new_latest.captured_at == base_time + timedelta(seconds=2)
+    assert snapshot.captured_at == base_time + timedelta(seconds=3)
+    assert snapshot.to_array() == (((6, 5, 4, 255),),)
+    assert client.get_frame_calls == [(0.25, True)]
+
+
 def test_scrcpy_frame_source_tap_swipe_map_normalized_points_to_frame_size() -> None:
     client = FakeScrcpyClient(frame_size=(200, 100))
     source = ScrcpyFrameSource(client_factory=lambda config: client)
@@ -85,21 +160,46 @@ def test_scrcpy_frame_source_tap_requires_available_frame_size() -> None:
         source.tap(NormalizedPoint(x=0.5, y=0.5))
 
 
+def _bgr_frame(*, blue: int, green: int, red: int) -> ScrcpyFrameArray:
+    return np.array([[[blue, green, red]]], dtype=np.uint8)
+
+
+def _patch_scrcpy_datetime(
+    monkeypatch: pytest.MonkeyPatch,
+    *times: datetime,
+) -> None:
+    queued_times = list(times)
+
+    class FakeDateTime:
+        @classmethod
+        def now(cls, tz: object | None = None) -> datetime:
+            assert tz is UTC
+            if not queued_times:
+                raise AssertionError("test exhausted fake scrcpy capture times")
+            return queued_times.pop(0)
+
+    monkeypatch.setattr(scrcpy_module, "datetime", FakeDateTime)
+
+
 class FakeScrcpyClient:
     def __init__(
         self,
         *,
         frame_size: tuple[int, int] = (1, 1),
         frame_size_error: Exception | None = None,
+        latest_frame: ScrcpyFrameArray | None = None,
+        frames: tuple[ScrcpyFrameArray, ...] | None = None,
     ) -> None:
-        self.latest_frame: ScrcpyFrameArray | None = None
+        self.latest_frame = latest_frame
         self.frame_counter = 0
         self.start_calls = 0
         self.stop_calls = 0
+        self.get_frame_calls: list[tuple[float | None, bool]] = []
         self.taps: list[tuple[int, int, float]] = []
         self.swipes: list[tuple[int, int, int, int, int, int]] = []
         self._frame_size = frame_size
         self._frame_size_error = frame_size_error
+        self._frames = list(frames) if frames is not None else []
 
     @property
     def frame_size(self) -> tuple[int, int]:
@@ -129,8 +229,10 @@ class FakeScrcpyClient:
         self.swipes.append((x1, y1, x2, y2, duration_ms, steps))
 
     def get_frame(self, *, timeout: float | None = None, copy: bool = True) -> ScrcpyFrameArray:
-        _ = timeout, copy
+        self.get_frame_calls.append((timeout, copy))
         self.frame_counter += 1
+        if self._frames:
+            return self._frames.pop(0)
         return np.zeros((1, 1, 3), dtype=np.uint8)
 
     def frames(

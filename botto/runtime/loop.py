@@ -1,12 +1,10 @@
-"""Read-only frame runtime loop and background analysis coordination."""
+"""Read-only snapshot decision runtime loop."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
 from time import monotonic
 from typing import Protocol, TypeGuard
 
@@ -55,11 +53,18 @@ class RuntimeBackend(Protocol):
 
 
 class RuntimeFrameSource(Protocol):
-    """Read-only frame source operations used by the runtime."""
+    """Read-only frame source operations used by the runtime.
+
+    Snapshot-loop contract: automation should acquire a single decision frame via
+    ``wait_for_frame()``. ``latest_frame()`` remains available as a non-blocking
+    helper for callers outside the automation runtime.
+    """
 
     def start(self) -> None: ...
 
     def stop(self) -> None: ...
+
+    def wait_for_frame(self, *, timeout: float | None = None) -> FrameImage: ...
 
     def latest_frame(self) -> FrameImage | None: ...
 
@@ -74,13 +79,6 @@ class RuntimeLoopSink(Protocol):
     """Receives current read-only runtime state and returns whether to continue."""
 
     def __call__(self, state: RuntimeLoopState) -> bool: ...
-
-
-@dataclass(frozen=True, slots=True)
-class _PendingRuntimeAnalysis:
-    future: Future[ScreenAnalysis]
-    started_at: float
-    frame_id: str | None
 
 
 async def run_read_only_runtime(
@@ -114,20 +112,6 @@ async def run_read_only_runtime(
     _LOGGER.debug("Opening runtime session for device %s", device_id or "default")
     session = await resolved_backend.open_session(device_id)
     source: RuntimeFrameSource | None = None
-    latest_snapshot: RuntimeAnalysisSnapshot | None = None
-    last_analysis_started_at: float | None = None
-    pending_analysis: _PendingRuntimeAnalysis | None = None
-    analysis_executor = ThreadPoolExecutor(
-        max_workers=1,
-        thread_name_prefix="botto-runtime-analysis",
-    )
-
-    def complete_pending_analysis_if_ready() -> RuntimeAnalysisSnapshot | None:
-        nonlocal latest_snapshot, pending_analysis
-        if pending_analysis is not None and pending_analysis.future.done():
-            latest_snapshot = _completed_runtime_analysis_snapshot(pending_analysis, clock=clock)
-            pending_analysis = None
-        return latest_snapshot
 
     try:
         if launch:
@@ -141,92 +125,66 @@ async def run_read_only_runtime(
         action_executor = _action_executor_for_source(source)
 
         while True:
-            complete_pending_analysis_if_ready()
-
-            frame = source.latest_frame()
-            frame_time = clock()
-            if (
-                frame is not None
-                and pending_analysis is None
-                and (
-                    last_analysis_started_at is None
-                    or frame_time - last_analysis_started_at >= analyze_every_seconds
-                )
-            ):
-                last_analysis_started_at = frame_time
-                pending_analysis = _start_runtime_analysis(
-                    analyzer,
-                    frame,
-                    started_at=frame_time,
-                    executor=analysis_executor,
-                )
+            tick_started_at = clock()
+            frame = source.wait_for_frame()
+            snapshot = _analyze_runtime_frame(analyzer, frame, clock=clock)
 
             state = RuntimeLoopState(
                 frame=frame,
-                analysis_snapshot=latest_snapshot,
-                now=frame_time,
-                analysis_running=pending_analysis is not None,
+                analysis_snapshot=snapshot,
+                now=snapshot.analyzed_at,
+                analysis_running=False,
                 session_info=session.info,
                 action_executor=action_executor,
-                _analysis_snapshot_refresher=complete_pending_analysis_if_ready,
             )
             if not sink(state):
                 _LOGGER.debug("Runtime sink requested stop")
                 break
-            await asyncio.sleep(0)
+            await _throttle_next_runtime_tick(
+                tick_started_at=tick_started_at,
+                analyze_every_seconds=analyze_every_seconds,
+                clock=clock,
+            )
     finally:
         try:
             if source is not None:
                 _LOGGER.debug("Stopping frame source")
                 source.stop()
         finally:
-            try:
-                _LOGGER.debug("Closing runtime session")
-                await session.close()
-            finally:
-                try:
-                    if pending_analysis is not None:
-                        _LOGGER.debug("Waiting for pending runtime analysis")
-                    await _finish_pending_runtime_analysis(pending_analysis)
-                finally:
-                    analysis_executor.shutdown(wait=True, cancel_futures=True)
-                    _LOGGER.debug("Runtime cleanup complete")
+            _LOGGER.debug("Closing runtime session")
+            await session.close()
+            _LOGGER.debug("Runtime cleanup complete")
 
 
-def _start_runtime_analysis(
+def _analyze_runtime_frame(
     analyzer: RuntimeScreenAnalyzer,
     frame: FrameImage,
     *,
-    started_at: float,
-    executor: ThreadPoolExecutor,
-) -> _PendingRuntimeAnalysis:
-    return _PendingRuntimeAnalysis(
-        future=executor.submit(analyzer, frame),
-        started_at=started_at,
-        frame_id=frame.frame_id,
-    )
-
-
-def _completed_runtime_analysis_snapshot(
-    pending: _PendingRuntimeAnalysis,
-    *,
     clock: RuntimeClock,
 ) -> RuntimeAnalysisSnapshot:
-    analysis = pending.future.result()
+    started_at = clock()
+    analysis = analyzer(frame)
     finished_at = clock()
     return RuntimeAnalysisSnapshot(
         analysis=analysis,
         analyzed_at=finished_at,
-        duration_seconds=max(0.0, finished_at - pending.started_at),
-        frame_id=pending.frame_id,
+        duration_seconds=max(0.0, finished_at - started_at),
+        frame_id=frame.frame_id,
     )
 
 
-async def _finish_pending_runtime_analysis(pending: _PendingRuntimeAnalysis | None) -> None:
-    if pending is None:
+async def _throttle_next_runtime_tick(
+    *,
+    tick_started_at: float,
+    analyze_every_seconds: float,
+    clock: RuntimeClock,
+) -> None:
+    elapsed_seconds = max(0.0, clock() - tick_started_at)
+    sleep_seconds = analyze_every_seconds - elapsed_seconds
+    if sleep_seconds <= 0:
         return
 
-    await asyncio.shield(asyncio.wrap_future(pending.future))
+    await asyncio.sleep(sleep_seconds)
 
 
 def _default_runtime_frame_source_factory(

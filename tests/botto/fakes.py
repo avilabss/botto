@@ -171,17 +171,33 @@ class FakeFrameSource:
         self._frames = frames
         self._latest_frames = latest_frames if latest_frames is not None else frames
         self._latest_frame_index = 0
+        self._wait_frame_index = 0
         self._fail_on_frames = fail_on_frames
+        self.started = False
         self.start_calls = 0
         self.stop_calls = 0
+        self.wait_for_frame_calls = 0
         self.latest_frame_calls = 0
         self.frames_calls = 0
 
     def start(self) -> None:
         self.start_calls += 1
+        self.started = True
 
     def stop(self) -> None:
         self.stop_calls += 1
+        self.started = False
+
+    def wait_for_frame(self, *, timeout: float | None = None) -> FrameImage:
+        _ = timeout
+        self.wait_for_frame_calls += 1
+        if not self.started:
+            raise RuntimeError("fake frame source is not started")
+        if self._wait_frame_index >= len(self._frames):
+            raise RuntimeError("fake frame source has no queued snapshot frame")
+        frame = self._frames[self._wait_frame_index]
+        self._wait_frame_index += 1
+        return frame
 
     def latest_frame(self) -> FrameImage | None:
         self.latest_frame_calls += 1

@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
 
@@ -191,8 +192,8 @@ def test_run_debug_preview_log_and_hotkey_artifacts_share_run_directory(
     backend = FakeAdbBackend(session=session)
     source = FakeFrameSource(frames=(make_frame("frame-1"), make_frame("frame-2")))
     source_factory = FakeFrameSourceFactory(source)
-    analyzer = BlockingAnalyzer()
-    preview = FakePreviewWindow(keys=(ord("s"), ord("q")), wait_callbacks=(None, analyzer.release))
+    analyzer = FakeAnalyzer()
+    preview = FakePreviewWindow(keys=(ord("s"), ord("q")))
 
     exit_code = run(
         ["run", "--debug", "--device", "emulator-5554", "--skip-launch"],
@@ -210,12 +211,16 @@ def test_run_debug_preview_log_and_hotkey_artifacts_share_run_directory(
     assert len(run_dirs) == 1
     run_dir = run_dirs[0]
     image_path = run_dir / "images" / "debug-preview-raw-000001.png"
+    analysis_path = run_dir / "json" / "debug-preview-raw-000001.json"
     log_path = run_dir / "text" / "run-log.txt"
     assert image_path.is_file()
+    assert analysis_path.is_file()
     assert log_path.is_file()
     logged_image_path = Path(".botto-artifacts") / run_dir.name / "images" / image_path.name
+    logged_analysis_path = Path(".botto-artifacts") / run_dir.name / "json" / analysis_path.name
     saved_message = (
-        f"saved debug-preview raw artifact debug-preview-raw-000001: image={logged_image_path}"
+        f"saved debug-preview raw artifact debug-preview-raw-000001: "
+        f"image={logged_image_path}, analysis={logged_analysis_path}"
     )
     expected_messages = [
         _loaded_config_message(config_path),
@@ -267,15 +272,17 @@ def test_run_debug_preview_warms_up_ocr_before_first_analysis(
     assert events == ["warmup", "analysis"]
 
 
-def test_debug_preview_throttles_analysis_and_reuses_latest_result_between_frames() -> None:
+def test_debug_preview_renders_processed_frames_with_matching_analysis() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
     source = FakeFrameSource(
-        frames=(make_frame("frame-1"), make_frame("frame-2"), make_frame("frame-3"))
+        frames=(make_frame("frame-1"), make_frame("frame-2"), make_frame("frame-3")),
+        latest_frames=(make_frame("live-frame-1"), make_frame("live-frame-2")),
     )
     source_factory = FakeFrameSourceFactory(source)
     preview = FakePreviewWindow(keys=(-1, -1, ord("q")))
     analyzer = FakeAnalyzer()
+    renderer = CapturingRenderer()
 
     asyncio.run(
         run_debug_preview(
@@ -286,17 +293,25 @@ def test_debug_preview_throttles_analysis_and_reuses_latest_result_between_frame
             source_factory=source_factory,
             preview_window=preview,
             screen_analyzer=analyzer,
-            overlay_renderer=passthrough_renderer,
-            clock=lambda: 0.0,
+            overlay_renderer=renderer,
+            clock=IncrementingClock(),
         )
     )
 
-    assert analyzer.frame_ids == ["frame-1"]
+    assert analyzer.frame_ids == ["frame-1", "frame-2", "frame-3"]
     assert [frame.frame_id for frame in preview.shown_frames] == [
         "frame-1",
         "frame-2",
         "frame-3",
     ]
+    assert [call.frame_id for call in renderer.calls] == ["frame-1", "frame-2", "frame-3"]
+    assert [call.snapshot_frame_id for call in renderer.calls] == [
+        "frame-1",
+        "frame-2",
+        "frame-3",
+    ]
+    assert [call.analysis_running for call in renderer.calls] == [False, False, False]
+    assert source.latest_frame_calls == 0
     assert source.stop_calls == 1
     assert session.closed is True
 
@@ -312,18 +327,16 @@ def passthrough_renderer(
     return frame
 
 
-def test_debug_preview_renders_newer_frames_while_slow_analysis_runs_single_flight() -> None:
+def test_debug_preview_does_not_render_newer_unanalyzed_latest_frames() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
     source = FakeFrameSource(
-        frames=(make_frame("frame-1"), make_frame("frame-2"), make_frame("frame-3"))
+        frames=(make_frame("processed-frame"),),
+        latest_frames=(make_frame("newer-live-frame"),),
     )
     source_factory = FakeFrameSourceFactory(source)
-    analyzer = BlockingAnalyzer()
-    preview = FakePreviewWindow(
-        keys=(-1, -1, ord("q")),
-        wait_callbacks=(analyzer.wait_until_started, None, analyzer.release),
-    )
+    preview = FakePreviewWindow(keys=(ord("q"),))
+    analyzer = PreviewObservingAnalyzer(preview_frames=lambda: preview.shown_frames)
     renderer = CapturingRenderer()
 
     asyncio.run(
@@ -340,18 +353,15 @@ def test_debug_preview_renders_newer_frames_while_slow_analysis_runs_single_flig
         )
     )
 
-    assert [frame.frame_id for frame in preview.shown_frames] == [
-        "frame-1",
-        "frame-2",
-        "frame-3",
-    ]
-    assert analyzer.frame_ids == ["frame-1"]
-    assert analyzer.finished.is_set()
-    assert [call.frame_id for call in renderer.calls] == ["frame-1", "frame-2", "frame-3"]
-    assert [call.analysis_running for call in renderer.calls] == [True, True, True]
+    assert [frame.frame_id for frame in preview.shown_frames] == ["processed-frame"]
+    assert analyzer.frame_ids == ["processed-frame"]
+    assert [call.frame_id for call in renderer.calls] == ["processed-frame"]
+    assert [call.snapshot_frame_id for call in renderer.calls] == ["processed-frame"]
+    assert source.wait_for_frame_calls == 1
+    assert source.latest_frame_calls == 0
 
 
-def test_debug_preview_uses_latest_frame_without_consuming_stale_frame_queue() -> None:
+def test_debug_preview_uses_wait_for_frame_snapshot_instead_of_latest_frame() -> None:
     session = FakeAdbSession(device_id="emulator-5554")
     backend = FakeAdbBackend(session=session)
     source = FakeFrameSource(
@@ -374,8 +384,9 @@ def test_debug_preview_uses_latest_frame_without_consuming_stale_frame_queue() -
         )
     )
 
-    assert [frame.frame_id for frame in preview.shown_frames] == ["latest-frame"]
-    assert source.latest_frame_calls == 1
+    assert [frame.frame_id for frame in preview.shown_frames] == ["queued-stale-frame"]
+    assert source.wait_for_frame_calls == 1
+    assert source.latest_frame_calls == 0
     assert source.frames_calls == 0
 
 
@@ -401,6 +412,7 @@ def test_debug_preview_runtime_hook_preserves_rendering_and_q_exit() -> None:
             screen_analyzer=FakeAnalyzer(),
             overlay_renderer=passthrough_renderer,
             runtime_state_hook=runtime_hook,
+            clock=IncrementingClock(),
         )
     )
 
@@ -409,7 +421,7 @@ def test_debug_preview_runtime_hook_preserves_rendering_and_q_exit() -> None:
     assert preview.closed == [DEFAULT_DEBUG_PREVIEW_WINDOW_TITLE]
 
 
-def test_debug_preview_s_hotkey_saves_raw_frame_and_latest_analysis(
+def test_debug_preview_s_hotkey_saves_raw_frame_and_matching_analysis(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -448,11 +460,8 @@ def test_debug_preview_s_hotkey_saves_raw_frame_and_latest_analysis(
             details={"overlay": Overlay.CONNECTION_LOST},
         ),
     )
-    analyzer = BlockingAnalyzer(analysis)
-    preview = FakePreviewWindow(
-        keys=(-1, ord("s"), ord("q")),
-        wait_callbacks=(analyzer.wait_until_started_release_and_finish,),
-    )
+    analyzer = FakeAnalyzer(analysis)
+    preview = FakePreviewWindow(keys=(ord("s"), ord("q")))
 
     asyncio.run(
         run_debug_preview(
@@ -464,6 +473,7 @@ def test_debug_preview_s_hotkey_saves_raw_frame_and_latest_analysis(
             source_factory=source_factory,
             preview_window=preview,
             screen_analyzer=analyzer,
+            clock=IncrementingClock(),
         )
     )
 
@@ -478,7 +488,7 @@ def test_debug_preview_s_hotkey_saves_raw_frame_and_latest_analysis(
         "Debug preview exit requested",
     ]
     with Image.open(image_path) as saved_image:
-        assert saved_image.getpixel((0, 0)) == (40, 50, 60, 255)
+        assert saved_image.getpixel((0, 0)) == (1, 2, 3, 255)
     payload = json.loads(analysis_path.read_text(encoding="utf-8"))
     assert payload["analysis"] == {
         "base_screen": "home_village",
@@ -507,7 +517,7 @@ def test_debug_preview_s_hotkey_saves_raw_frame_and_latest_analysis(
         },
     }
     assert payload["analysis_frame_id"] == "frame-1"
-    assert payload["frame"]["frame_id"] == "frame-2"
+    assert payload["frame"]["frame_id"] == "frame-1"
     manifest_entries = [
         json.loads(line)
         for line in (tmp_path / "debug-preview-run" / "manifest.jsonl")
@@ -518,47 +528,7 @@ def test_debug_preview_s_hotkey_saves_raw_frame_and_latest_analysis(
     assert {entry["run_dir"] for entry in manifest_entries} == {"debug-preview-run"}
 
 
-def test_debug_preview_hotkey_harvests_analysis_completed_during_wait_before_save(
-    tmp_path: Path,
-) -> None:
-    session = FakeAdbSession(device_id="emulator-5554")
-    backend = FakeAdbBackend(session=session)
-    source = FakeFrameSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
-    source_factory = FakeFrameSourceFactory(source)
-    analysis = ScreenAnalysis(
-        base_screen=BaseScreen.HOME_VILLAGE,
-        overlay=Overlay.NONE,
-        confidence=0.8,
-    )
-    analyzer = BlockingAnalyzer(analysis)
-    preview = FakePreviewWindow(
-        keys=(ord("s"), ord("q")),
-        wait_callbacks=(analyzer.wait_until_started_release_and_finish,),
-    )
-
-    asyncio.run(
-        run_debug_preview(
-            device_id="emulator-5554",
-            launch=False,
-            artifact_root=tmp_path,
-            run_name="fresh-hotkey-run",
-            backend=backend,
-            source_factory=source_factory,
-            preview_window=preview,
-            screen_analyzer=analyzer,
-            overlay_renderer=passthrough_renderer,
-        )
-    )
-
-    analysis_path = tmp_path / "fresh-hotkey-run" / "json" / "debug-preview-raw-000001.json"
-    assert analysis_path.is_file()
-    payload = json.loads(analysis_path.read_text(encoding="utf-8"))
-    assert payload["analysis"]["base_screen"] == "home_village"
-    assert payload["analysis_frame_id"] == "frame-1"
-    assert payload["frame"]["frame_id"] == "frame-1"
-
-
-def test_debug_preview_d_hotkey_saves_annotated_frame_and_latest_analysis(
+def test_debug_preview_d_hotkey_saves_annotated_frame_and_matching_analysis(
     tmp_path: Path,
 ) -> None:
     session = FakeAdbSession(device_id="emulator-5554")
@@ -567,7 +537,6 @@ def test_debug_preview_d_hotkey_saves_annotated_frame_and_latest_analysis(
         frames=(
             make_frame("frame-1", rgba=(1, 2, 3, 255)),
             make_frame("frame-2", rgba=(40, 50, 60, 255)),
-            make_frame("frame-3", rgba=(70, 80, 90, 255)),
         )
     )
     source_factory = FakeFrameSourceFactory(source)
@@ -576,11 +545,8 @@ def test_debug_preview_d_hotkey_saves_annotated_frame_and_latest_analysis(
         overlay=Overlay.CONNECTION_LOST,
         confidence=0.9,
     )
-    analyzer = BlockingAnalyzer(analysis)
-    preview = FakePreviewWindow(
-        keys=(-1, ord("d"), ord("q")),
-        wait_callbacks=(analyzer.wait_until_started_release_and_finish,),
-    )
+    analyzer = FakeAnalyzer(analysis)
+    preview = FakePreviewWindow(keys=(ord("d"), ord("q")))
 
     asyncio.run(
         run_debug_preview(
@@ -593,6 +559,7 @@ def test_debug_preview_d_hotkey_saves_annotated_frame_and_latest_analysis(
             preview_window=preview,
             screen_analyzer=analyzer,
             overlay_renderer=SolidDebugRenderer(rgba=(9, 8, 7, 255)),
+            clock=IncrementingClock(),
         )
     )
 
@@ -604,48 +571,12 @@ def test_debug_preview_d_hotkey_saves_annotated_frame_and_latest_analysis(
         assert saved_image.getpixel((0, 0)) == (9, 8, 7, 255)
     payload = json.loads(analysis_path.read_text(encoding="utf-8"))
     assert payload["analysis"]["overlay"] == "connection_lost"
-    assert payload["frame"]["frame_id"] == "frame-2-debug"
+    assert payload["analysis_frame_id"] == "frame-1"
+    assert payload["frame"]["frame_id"] == "frame-1"
     assert [frame.frame_id for frame in preview.shown_frames] == [
-        "frame-1-debug",
-        "frame-2-debug",
-        "frame-3-debug",
+        "frame-1",
+        "frame-2",
     ]
-    assert session.recovery_actions == []
-    assert not hasattr(session, "tap")
-    assert not hasattr(session, "swipe")
-
-
-def test_debug_preview_hotkey_skips_analysis_json_when_no_snapshot_exists(
-    tmp_path: Path,
-) -> None:
-    session = FakeAdbSession(device_id="emulator-5554")
-    backend = FakeAdbBackend(session=session)
-    source = FakeFrameSource(frames=(make_frame("frame-1", rgba=(10, 20, 30, 255)),))
-    source_factory = FakeFrameSourceFactory(source)
-    analyzer = BlockingAnalyzer()
-    preview = FakePreviewWindow(
-        keys=(ord("s"), ord("q")),
-        wait_callbacks=(analyzer.wait_until_started, analyzer.release),
-    )
-
-    asyncio.run(
-        run_debug_preview(
-            device_id="emulator-5554",
-            launch=False,
-            artifact_root=tmp_path,
-            run_name="no-analysis-run",
-            backend=backend,
-            source_factory=source_factory,
-            preview_window=preview,
-            screen_analyzer=analyzer,
-            overlay_renderer=passthrough_renderer,
-        )
-    )
-
-    image_path = tmp_path / "no-analysis-run" / "images" / "debug-preview-raw-000001.png"
-    assert image_path.is_file()
-    assert not (tmp_path / "no-analysis-run" / "json").exists()
-    assert source.latest_frame_calls == 2
     assert session.recovery_actions == []
     assert not hasattr(session, "tap")
     assert not hasattr(session, "swipe")
@@ -741,7 +672,7 @@ def test_debug_overlay_renderer_annotates_copy_with_evidence_and_target() -> Non
 
 
 @pytest.mark.parametrize("exit_key", [ord("q"), 27])
-def test_debug_preview_exits_on_q_or_escape_cleans_up_background_work_and_remains_read_only(
+def test_debug_preview_exits_on_q_or_escape_and_remains_read_only(
     exit_key: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -765,11 +696,8 @@ def test_debug_preview_exits_on_q_or_escape_cleans_up_background_work_and_remain
             tap_target=NormalizedPoint(x=0.5, y=0.88),
         ),
     )
-    analyzer = BlockingAnalyzer(analysis)
-    preview = FakePreviewWindow(
-        keys=(exit_key,),
-        wait_callbacks=(analyzer.wait_until_started_and_release,),
-    )
+    analyzer = FakeAnalyzer(analysis)
+    preview = FakePreviewWindow(keys=(exit_key,))
 
     exit_code = run(
         ["run", "--debug", "--device", "emulator-5554", "--skip-launch"],
@@ -785,7 +713,6 @@ def test_debug_preview_exits_on_q_or_escape_cleans_up_background_work_and_remain
     assert not hasattr(session, "tap")
     assert not hasattr(session, "swipe")
     assert analyzer.frame_ids == ["1"]
-    assert analyzer.finished.is_set()
     assert source.stop_calls == 1
     assert session.closed is True
 
@@ -834,44 +761,14 @@ class FakeAnalyzer:
         return self._analysis
 
 
-class BlockingAnalyzer:
-    def __init__(self, analysis: ScreenAnalysis | None = None) -> None:
-        self._analysis = analysis or ScreenAnalysis(
-            base_screen=BaseScreen.UNKNOWN,
-            overlay=Overlay.NONE,
-            confidence=0.0,
-        )
-        self.started = threading.Event()
-        self._release = threading.Event()
-        self.finished = threading.Event()
-        self._lock = threading.Lock()
-        self.frame_ids: list[str | None] = []
+class PreviewObservingAnalyzer(FakeAnalyzer):
+    def __init__(self, *, preview_frames: Callable[[], list[FrameImage]]) -> None:
+        super().__init__()
+        self._preview_frames = preview_frames
 
     def __call__(self, image: FrameImage) -> ScreenAnalysis:
-        with self._lock:
-            self.frame_ids.append(image.frame_id)
-        self.started.set()
-        if not self._release.wait(timeout=5.0):
-            raise AssertionError("test did not release the blocking analyzer")
-        self.finished.set()
-        return self._analysis
-
-    def wait_until_started(self) -> None:
-        if not self.started.wait(timeout=2.0):
-            raise AssertionError("analysis did not start")
-
-    def release(self) -> None:
-        self._release.set()
-
-    def wait_until_started_and_release(self) -> None:
-        self.wait_until_started()
-        self.release()
-
-    def wait_until_started_release_and_finish(self) -> None:
-        self.wait_until_started()
-        self.release()
-        if not self.finished.wait(timeout=2.0):
-            raise AssertionError("analysis did not finish")
+        assert self._preview_frames() == []
+        return super().__call__(image)
 
 
 class IncrementingClock:
@@ -887,8 +784,15 @@ class IncrementingClock:
 
 
 class RenderCall:
-    def __init__(self, *, frame_id: str | None, analysis_running: bool) -> None:
+    def __init__(
+        self,
+        *,
+        frame_id: str | None,
+        snapshot_frame_id: str | None,
+        analysis_running: bool,
+    ) -> None:
         self.frame_id = frame_id
+        self.snapshot_frame_id = snapshot_frame_id
         self.analysis_running = analysis_running
 
 
@@ -904,8 +808,14 @@ class CapturingRenderer:
         now: float | None = None,
         analysis_running: bool = False,
     ) -> FrameImage:
-        _ = snapshot, now
-        self.calls.append(RenderCall(frame_id=frame.frame_id, analysis_running=analysis_running))
+        _ = now
+        self.calls.append(
+            RenderCall(
+                frame_id=frame.frame_id,
+                snapshot_frame_id=snapshot.frame_id if snapshot is not None else None,
+                analysis_running=analysis_running,
+            )
+        )
         return frame
 
 
@@ -923,7 +833,7 @@ class SolidDebugRenderer:
     ) -> FrameImage:
         _ = snapshot, now, analysis_running
         return make_frame(
-            f"{frame.frame_id}-debug" if frame.frame_id is not None else "debug-frame",
+            frame.frame_id,
             width=frame.width,
             height=frame.height,
             rgba=self._rgba,
