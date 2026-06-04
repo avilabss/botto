@@ -1,0 +1,16 @@
+name: botto-label-studio
+
+services:
+  label-studio:
+    image: heartexlabs/label-studio:latest
+    container_name: botto-label-studio
+    user: "${LABEL_STUDIO_UID:-1000}:${LABEL_STUDIO_GID:-1000}"
+    env_file:
+      - ../env/label-studio.env
+    ports:
+      - "${LABEL_STUDIO_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ${PROJECT_ROOT:-../..}/data/label-studio
+        target: /label-studio/data
+    restart: unless-stopped

@@ -6,5 +6,30 @@ dist/
 wheels/
 *.egg-info
 
+# Rust-generated files
+target/
+
 # Virtual environments
 .venv
+
+# Local runtime data
+data/*
+!data/.gitkeep
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+!data/label-studio/
+data/label-studio/*
+!data/label-studio/.gitkeep
+!data/exports/
+data/exports/*
+!data/exports/.gitkeep
+!data/datasets/
+data/datasets/*
+!data/datasets/.gitkeep
+!data/models/
+data/models/*
+!data/models/.gitkeep
+!data/runs/
+data/runs/*
+!data/runs/.gitkeep
